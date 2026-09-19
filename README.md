@@ -49,7 +49,9 @@ O projeto roda inteiramente no navegador como uma **Single Page Application (SPA
 |---|---|
 | **React 18** (UMD + Babel Standalone) | Interface reativa em arquivo único |
 | **WebRTC** (`getUserMedia`) | Captura de vídeo da webcam |
-| **Canvas API** | Extração de pseudo-embeddings faciais (vetores 128D) |
+| **Canvas API** | Extração de embeddings faciais avançados (HOG + LBP + cor, 128D) |
+| **Web Crypto API** | Criptografia AES-256-GCM dos embeddings armazenados |
+| **IndexedDB** | Persistência local dos cadastros, galeria e histórico |
 | **CSS Custom Properties** | Design tokens com suporte a dark/light mode |
 | **General Sans** + **Commit Mono** | Tipografia — sem fontes "padrão de IA" |
 | **SVG Icon System** | Ícones vetoriais inline (sem emoji/Unicode) |
@@ -113,45 +115,63 @@ O sistema implementa 3 níveis de acesso e 2 divisões:
 │  └─────┬─────┘  └─────┬──────┘  └────┬───┘ │
 │        │               │              │      │
 │  ┌─────▼───────────────▼──────────────▼───┐ │
-│  │         Estado em Memória (React)       │ │
+│  │      IndexedDB + AES-256-GCM           │ │
 │  │  • users[]    • gallery{}   • attempts[]│ │
+│  │  • Embeddings cifrados (Web Crypto API) │ │
 │  └─────────────────┬──────────────────────┘ │
 │                    │                         │
 │  ┌─────────────────▼──────────────────────┐ │
-│  │        Motor de Reconhecimento          │ │
-│  │  • Pseudo-embeddings 128D (Canvas)      │ │
+│  │        Motor de Reconhecimento v2       │ │
+│  │  • HOG + LBP + cor + stats (128D)       │ │
 │  │  • Distância Euclidiana + L2 Normalize  │ │
 │  │  • Threshold: 0.8 / Margem: 0.1        │ │
 │  └─────────────────┬──────────────────────┘ │
 │                    │                         │
 │  ┌─────────────────▼──────────────────────┐ │
+│  │       Detecção de vivacidade            │ │
+│  │  • Motion: Δ pixels entre frames        │ │
+│  │  • Texture: variância de gradientes     │ │
+│  └─────────────────┬──────────────────────┘ │
+│                    │                         │
+│  ┌─────────────────▼──────────────────────┐ │
 │  │           WebRTC (getUserMedia)          │ │
-│  │           Acesso à webcam               │ │
+│  │          Acesso à webcam (64×64)        │ │
 │  └────────────────────────────────────────┘ │
 └─────────────────────────────────────────────┘
 ```
 
 ### Fluxo de verificação
 
-1. A webcam captura um frame a cada 2,5 segundos
-2. O frame é redimensionado para 32×32 px via Canvas
-3. Um pseudo-embedding de 128 dimensões é extraído dos pixels
-4. O vetor é normalizado (L2) e comparado com a galeria cadastrada
-5. A menor distância Euclidiana determina a identidade
-6. As regras de autorização verificam se o usuário tem acesso à área selecionada
+1. A webcam captura um frame a cada 2,5 segundos (+ liveness a cada 800ms)
+2. O frame é redimensionado para 64×64 px via Canvas
+3. Detecção de vivacidade: motion score (Δ pixels) + texture score (variância de gradientes)
+4. Se liveness < threshold → acesso negado (possível spoofing)
+5. Embedding avançado 128D extraído: HOG (64) + LBP (32) + cor (16) + stats (16)
+6. O vetor é normalizado (L2) e comparado com a galeria cadastrada (cifrada com AES-256)
+7. A menor distância Euclidiana determina a identidade
+8. As regras de autorização verificam se o usuário tem acesso à área selecionada
 
 ---
 
-## ⚠ Limitações
+## ✅ Limitações corrigidas (v2)
+
+| Limitação original | Correção implementada |
+|---|---|
+| ~~Dados em memória~~ | **IndexedDB** — cadastros, galeria e histórico persistem entre sessões |
+| ~~Pseudo-embeddings~~ | **HOG + LBP + cor** — embeddings 128D com histogramas de gradiente orientado, Local Binary Patterns, histogramas de cor e estatísticas regionais |
+| ~~Sem prova de vida~~ | **Detecção de vivacidade** — análise de movimento entre frames + variância de textura de gradientes (anti-spoofing por foto/print) |
+| ~~Sem persistência~~ | **IndexedDB** — banco de dados local no navegador com export/import JSON para backup |
+| ~~Sem criptografia~~ | **AES-256-GCM** — embeddings cifrados via Web Crypto API antes do armazenamento |
+| ~~Somente simulação~~ | Acadêmico v2 — melhorias significativas, mas ainda não adequado para produção real |
+
+### Limitações remanescentes
 
 | Limitação | Descrição |
 |---|---|
-| **Dados em memória** | Os cadastros são perdidos ao fechar ou recarregar a página |
-| **Pseudo-embeddings** | O reconhecimento usa vetores simplificados extraídos dos pixels (não usa FaceNet/dlib real) |
-| **Sem prova de vida** | O sistema não distingue uma foto impressa de um rosto real |
-| **Sem persistência** | Não há banco de dados; tudo roda localmente no navegador |
-| **Sem criptografia** | Os embeddings não são cifrados em memória |
-| **Somente simulação** | Não adequado para uso em produção |
+| **Sem FaceNet/dlib** | O reconhecimento usa features computacionais (HOG/LBP), não redes neurais profundas |
+| **Liveness limitado** | Detecta fotos estáticas, mas pode ser enganado por vídeos de alta qualidade |
+| **Chave local** | A chave AES-256 reside no IndexedDB do mesmo navegador (sem HSM/KMS externo) |
+| **Sem backend** | Tudo roda no navegador; sem autenticação de rede ou auditoria centralizada |
 
 ---
 

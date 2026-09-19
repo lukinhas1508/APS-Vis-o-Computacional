@@ -210,6 +210,20 @@ input, select, textarea { caret-color: var(--accent); }
   50% { opacity: 0.3; }
 }
 
+/* ===== Liveness badge ===== */
+.liveness-badge {
+  position: absolute; top: 10px; right: 10px;
+  display: flex; align-items: center; gap: 5px;
+  font: 500 10px/1 var(--mono); letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 4px 8px; border-radius: var(--radius);
+  backdrop-filter: blur(4px);
+}
+.liveness-badge[data-level="high"] { background: rgba(62,201,126,0.85); color: #fff; }
+.liveness-badge[data-level="medium"] { background: rgba(229,169,62,0.85); color: #fff; }
+.liveness-badge[data-level="low"] { background: rgba(229,90,90,0.85); color: #fff; }
+.liveness-badge[data-level="none"] { background: rgba(107,108,114,0.7); color: #fff; }
+
 /* ===== Area selector ===== */
 .areas {
   display: flex; gap: 4px; flex-wrap: wrap;
@@ -447,6 +461,11 @@ const Icon = ({ name, size = 15, ...props }) => {
     alert: <><path d="M12 3l9 16H3L12 3z"/><line x1="12" y1="10" x2="12" y2="13"/><circle cx="12" cy="16" r="0.5"/></>,
     building: <><rect x="4" y="3" width="16" height="18" rx="1"/><path d="M9 21v-4h6v4"/><rect x="8" y="7" width="2" height="2" rx="0.5"/><rect x="14" y="7" width="2" height="2" rx="0.5"/><rect x="8" y="12" width="2" height="2" rx="0.5"/><rect x="14" y="12" width="2" height="2" rx="0.5"/></>,
     minus: <line x1="6" y1="12" x2="18" y2="12" strokeLinecap="round"/>,
+    database: <><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/></>,
+    download: <><path d="M12 3v12m0 0l-4-4m4 4l4-4" strokeLinecap="round" strokeLinejoin="round"/><path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></>,
+    upload: <><path d="M12 15V3m0 0l-4 4m4-4l4 4" strokeLinecap="round" strokeLinejoin="round"/><path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></>,
+    eye: <><circle cx="12" cy="12" r="3"/><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7"/></>,
+    lock: <><rect x="7" y="11" width="10" height="9" rx="1"/><path d="M9 11V7a3 3 0 016 0v4"/><circle cx="12" cy="15.5" r="1"/></>,
   };
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -489,6 +508,124 @@ function l2Normalize(v) {
   return norm === 0 ? v : v.map(x => x / norm);
 }
 
+/* ================================================================ */
+/* Advanced embedding — HOG + LBP + color + stats (128D)            */
+/* ================================================================ */
+const EMB_SIZE = 64;
+const EMB_CELLS = 4;
+const EMB_CELL_PX = EMB_SIZE / EMB_CELLS;
+
+function toGray(imgData, w, h) {
+  const g = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const j = i * 4;
+    g[i] = (0.299 * imgData[j] + 0.587 * imgData[j + 1] + 0.114 * imgData[j + 2]) / 255;
+  }
+  return g;
+}
+
+function extractEmbedding(imgData, w, h) {
+  const gray = toGray(imgData, w, h);
+  const features = [];
+  const C = EMB_CELLS, S = EMB_CELL_PX, BINS = 4;
+
+  /* 1. HOG-like: gradient orientation histograms — 4×4 cells × 4 bins = 64 features */
+  for (let cy = 0; cy < C; cy++) {
+    for (let cx = 0; cx < C; cx++) {
+      const hist = new Float32Array(BINS);
+      for (let y = cy * S + 1; y < (cy + 1) * S - 1; y++) {
+        for (let x = cx * S + 1; x < (cx + 1) * S - 1; x++) {
+          const gx = gray[y * w + x + 1] - gray[y * w + x - 1];
+          const gy = gray[(y + 1) * w + x] - gray[(y - 1) * w + x];
+          const mag = Math.sqrt(gx * gx + gy * gy);
+          const ang = (Math.atan2(gy, gx) + Math.PI) / (2 * Math.PI);
+          hist[Math.min(Math.floor(ang * BINS), BINS - 1)] += mag;
+        }
+      }
+      features.push(...hist);
+    }
+  }
+
+  /* 2. LBP-like: local binary pattern mean + std — 4×4 × 2 = 32 features */
+  for (let cy = 0; cy < C; cy++) {
+    for (let cx = 0; cx < C; cx++) {
+      let sum = 0, sq = 0, n = 0;
+      for (let y = cy * S + 1; y < (cy + 1) * S - 1; y++) {
+        for (let x = cx * S + 1; x < (cx + 1) * S - 1; x++) {
+          const c0 = gray[y * w + x]; let lbp = 0;
+          const nb = [
+            gray[(y-1)*w+x-1], gray[(y-1)*w+x], gray[(y-1)*w+x+1], gray[y*w+x+1],
+            gray[(y+1)*w+x+1], gray[(y+1)*w+x], gray[(y+1)*w+x-1], gray[y*w+x-1],
+          ];
+          for (let k = 0; k < 8; k++) if (nb[k] >= c0) lbp |= (1 << k);
+          const v = lbp / 255;
+          sum += v; sq += v * v; n++;
+        }
+      }
+      const mean = sum / n;
+      features.push(mean, Math.sqrt(Math.max(0, sq / n - mean * mean)));
+    }
+  }
+
+  /* 3. Color histograms: R, G, B, luminance — 4 channels × 4 bins = 16 features */
+  const cHist = [new Float32Array(4), new Float32Array(4), new Float32Array(4), new Float32Array(4)];
+  const total = w * h;
+  for (let i = 0; i < total; i++) {
+    const j = i * 4;
+    const ch = [imgData[j]/255, imgData[j+1]/255, imgData[j+2]/255, gray[i]];
+    for (let c = 0; c < 4; c++) cHist[c][Math.min(Math.floor(ch[c] * 4), 3)]++;
+  }
+  for (let c = 0; c < 4; c++) for (let b = 0; b < 4; b++) features.push(cHist[c][b] / total);
+
+  /* 4. Regional statistics: per-cell mean — 4×4 = 16 features */
+  for (let cy = 0; cy < C; cy++) {
+    for (let cx = 0; cx < C; cx++) {
+      let s = 0;
+      for (let y = cy * S; y < (cy + 1) * S; y++)
+        for (let x = cx * S; x < (cx + 1) * S; x++) s += gray[y * w + x];
+      features.push(s / (S * S));
+    }
+  }
+
+  return l2Normalize(features); /* 64 + 32 + 16 + 16 = 128D */
+}
+
+/* ================================================================ */
+/* Liveness detection — motion + texture anti-spoofing              */
+/* ================================================================ */
+function computeLiveness(prevGray, currGray, w, h) {
+  if (!prevGray) return { motion: 0, texture: 0, score: 0, level: "none" };
+
+  /* Motion: average absolute pixel difference between frames */
+  let motionSum = 0;
+  for (let i = 0; i < w * h; i++) motionSum += Math.abs(currGray[i] - prevGray[i]);
+  const motion = Math.min(motionSum / (w * h) * 20, 1);
+
+  /* Texture: variance of gradient magnitudes per block (real faces have complex 3D texture) */
+  let texScore = 0;
+  const B = 4, bs = w / B;
+  for (let by = 0; by < B; by++) {
+    for (let bx = 0; bx < B; bx++) {
+      let s = 0, sq = 0, n = 0;
+      for (let y = by * bs + 1; y < (by + 1) * bs - 1; y++) {
+        for (let x = bx * bs + 1; x < (bx + 1) * bs - 1; x++) {
+          const gx = currGray[y * w + x + 1] - currGray[y * w + x - 1];
+          const gy = currGray[(y + 1) * w + x] - currGray[(y - 1) * w + x];
+          const mag = Math.sqrt(gx * gx + gy * gy);
+          s += mag; sq += mag * mag; n++;
+        }
+      }
+      const mean = s / n;
+      texScore += sq / n - mean * mean;
+    }
+  }
+  const texture = Math.min(texScore / (B * B) * 120, 1);
+
+  const score = motion * 0.55 + texture * 0.45;
+  const level = score > 0.45 ? "high" : score > 0.18 ? "medium" : score > 0.04 ? "low" : "none";
+  return { motion, texture, score, level };
+}
+
 function identify(query, gallery, users, threshold = 0.8, margin = 0.1) {
   const qNorm = l2Normalize(query);
   const candidates = [];
@@ -504,6 +641,162 @@ function identify(query, gallery, users, threshold = 0.8, margin = 0.1) {
     return { user: null, dist: best.dist, reason: "identidade_ambigua" };
   const u = users.find(u => u.id === best.userId);
   return u ? { user: u, dist: best.dist, reason: "identificado" } : { user: null, dist: best.dist, reason: "desconhecido" };
+}
+
+/* ================================================================ */
+/* IndexedDB — persistência local                                    */
+/* ================================================================ */
+
+const DB_NAME = "cofre_academico";
+const DB_VERSION = 2;
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (event) => {
+      const db = req.result;
+      const old = event.oldVersion;
+      if (old < 1) {
+        db.createObjectStore("users", { keyPath: "id" });
+        db.createObjectStore("gallery", { keyPath: "userId" });
+        db.createObjectStore("attempts", { autoIncrement: true });
+      }
+      if (old < 2) {
+        if (!db.objectStoreNames.contains("crypto")) db.createObjectStore("crypto", { keyPath: "id" });
+        /* Limpar galeria: formato de embedding mudou (HOG/LBP vs pixel bruto) */
+        if (old >= 1) { req.transaction.objectStore("gallery").clear(); req.transaction.objectStore("users").clear(); }
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbSaveUsers(users) {
+  const db = await openDB();
+  const tx = db.transaction("users", "readwrite");
+  const store = tx.objectStore("users");
+  store.clear();
+  users.forEach(u => store.put(u));
+  return new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+}
+
+async function dbSaveGallery(gallery) {
+  const key = await getOrCreateKey();
+  const entries = [];
+  for (const [userId, vectors] of Object.entries(gallery)) {
+    const encrypted = await encryptVectors(vectors, key);
+    entries.push({ userId, encrypted });
+  }
+  const db = await openDB();
+  const tx = db.transaction("gallery", "readwrite");
+  const store = tx.objectStore("gallery");
+  store.clear();
+  entries.forEach(e => store.put(e));
+  return new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+}
+
+async function dbSaveAttempts(attempts) {
+  const db = await openDB();
+  const tx = db.transaction("attempts", "readwrite");
+  const store = tx.objectStore("attempts");
+  store.clear();
+  attempts.forEach(a => store.put(a));
+  return new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+}
+
+async function dbLoadAll() {
+  try {
+    const db = await openDB();
+    const load = (storeName) => new Promise((res, rej) => {
+      const tx = db.transaction(storeName, "readonly");
+      const req = tx.objectStore(storeName).getAll();
+      req.onsuccess = () => res(req.result);
+      req.onerror = rej;
+    });
+    const [users, galleryRows, attempts] = await Promise.all([
+      load("users"), load("gallery"), load("attempts"),
+    ]);
+    const gallery = {};
+    if (galleryRows.length > 0) {
+      const key = await getOrCreateKey();
+      for (const r of galleryRows) {
+        if (r.encrypted) {
+          try { gallery[r.userId] = await decryptVectors(r.encrypted, key); } catch { /* skip corrupt */ }
+        } else if (r.vectors) {
+          gallery[r.userId] = r.vectors; /* backward compat */
+        }
+      }
+    }
+    return { users, gallery, attempts };
+  } catch { return { users: [], gallery: {}, attempts: [] }; }
+}
+
+async function dbClear() {
+  const db = await openDB();
+  const tx = db.transaction(["users", "gallery", "attempts"], "readwrite");
+  tx.objectStore("users").clear();
+  tx.objectStore("gallery").clear();
+  tx.objectStore("attempts").clear();
+  return new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+}
+
+/* ================================================================ */
+/* Criptografia — AES-256-GCM via Web Crypto API                     */
+/* ================================================================ */
+async function getOrCreateKey() {
+  const db = await openDB();
+  const stored = await new Promise((res, rej) => {
+    const tx = db.transaction("crypto", "readonly");
+    const req = tx.objectStore("crypto").get("master");
+    req.onsuccess = () => res(req.result);
+    req.onerror = rej;
+  });
+  if (stored) return stored.key;
+  const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  const db2 = await openDB();
+  const tx = db2.transaction("crypto", "readwrite");
+  tx.objectStore("crypto").put({ id: "master", key });
+  await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+  return key;
+}
+
+async function encryptVectors(vectors, key) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new TextEncoder().encode(JSON.stringify(vectors));
+  const enc = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data);
+  return { iv: Array.from(iv), ct: Array.from(new Uint8Array(enc)) };
+}
+
+async function decryptVectors(encrypted, key) {
+  const iv = new Uint8Array(encrypted.iv);
+  const ct = new Uint8Array(encrypted.ct).buffer;
+  const dec = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
+  return JSON.parse(new TextDecoder().decode(dec));
+}
+
+function exportData(users, gallery, attempts) {
+  const data = { version: 1, exportedAt: new Date().toISOString(), users, gallery, attempts };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `cofre-backup-${new Date().toISOString().slice(0,10)}.json`;
+  a.click(); URL.revokeObjectURL(url);
+}
+
+function importData(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (!data.users || !data.gallery) throw new Error("Formato inválido");
+        resolve(data);
+      } catch (e) { reject(e); }
+    };
+    reader.onerror = reject;
+    reader.readAsText(file);
+  });
 }
 
 /* ================================================================ */
@@ -527,13 +820,59 @@ function App() {
   const [users, setUsers] = useState([]);
   const [gallery, setGallery] = useState({});
   const [attempts, setAttempts] = useState([]);
+  const [dbReady, setDbReady] = useState(false);
 
   const [area, setArea] = useState("geral");
   const [cameraActive, setCameraActive] = useState(false);
   const [decision, setDecision] = useState(null);
+  const [liveness, setLiveness] = useState({ motion: 0, texture: 0, score: 0, level: "none" });
+
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const canvasRef = useRef(null);
+  const importRef = useRef(null);
+  const prevGrayRef = useRef(null);
+
+  /* IndexedDB — load on mount */
+  useEffect(() => {
+    dbLoadAll().then(data => {
+      if (data.users.length) setUsers(data.users);
+      if (Object.keys(data.gallery).length) setGallery(data.gallery);
+      if (data.attempts.length) setAttempts(data.attempts);
+      setDbReady(true);
+    }).catch(() => setDbReady(true));
+  }, []);
+
+  /* IndexedDB — auto-save on changes (skip initial empty state) */
+  useEffect(() => { if (dbReady) dbSaveUsers(users).catch(() => {}); }, [users, dbReady]);
+  useEffect(() => { if (dbReady) dbSaveGallery(gallery).catch(() => {}); }, [gallery, dbReady]);
+  useEffect(() => { if (dbReady) dbSaveAttempts(attempts).catch(() => {}); }, [attempts, dbReady]);
+
+  /* Database management */
+  const handleExport = useCallback(() => {
+    exportData(users, gallery, attempts);
+    toast("Backup exportado com sucesso!");
+  }, [users, gallery, attempts, toast]);
+
+  const handleImport = useCallback(async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const data = await importData(file);
+      setUsers(data.users || []);
+      setGallery(data.gallery || {});
+      setAttempts(data.attempts || []);
+      toast(`Backup restaurado — ${(data.users || []).length} usuários carregados.`);
+    } catch { toast("Arquivo inválido. Use um backup exportado pelo sistema.", "error"); }
+    e.target.value = "";
+  }, [toast]);
+
+  const handleClearDb = useCallback(async () => {
+    if (!confirm("Limpar todos os dados do banco? Cadastros, galeria e histórico serão removidos permanentemente.")) return;
+    setUsers([]); setGallery({}); setAttempts([]);
+    await dbClear().catch(() => {});
+    toast("Banco de dados limpo com sucesso.");
+  }, [toast]);
 
   const [regId, setRegId] = useState("");
   const [regName, setRegName] = useState("");
@@ -569,6 +908,20 @@ function App() {
 
   useEffect(() => () => stopCamera(), [stopCamera]);
   useEffect(() => { startCamera(); }, []);
+
+  /* Liveness tracking — update every 800ms for real-time feedback */
+  useEffect(() => {
+    if (!cameraActive) { prevGrayRef.current = null; setLiveness({ motion: 0, texture: 0, score: 0, level: "none" }); return; }
+    const iv = setInterval(() => {
+      const frame = captureFrame();
+      if (!frame) return;
+      const gray = toGray(frame.data, EMB_SIZE, EMB_SIZE);
+      const live = computeLiveness(prevGrayRef.current, gray, EMB_SIZE, EMB_SIZE);
+      prevGrayRef.current = gray;
+      setLiveness(live);
+    }, 800);
+    return () => clearInterval(iv);
+  }, [cameraActive, captureFrame]);
   useEffect(() => {
     if (cameraActive && videoRef.current && streamRef.current) {
       videoRef.current.srcObject = streamRef.current;
@@ -576,34 +929,55 @@ function App() {
     }
   }, [cameraActive]);
 
-  /* Embedding */
-  const captureEmbedding = useCallback(() => {
+  /* Frame capture + advanced embedding + liveness */
+  const captureFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current) return null;
-    const c = canvasRef.current, ctx = c.getContext("2d");
-    c.width = 32; c.height = 32;
-    ctx.drawImage(videoRef.current, 0, 0, 32, 32);
-    const d = ctx.getImageData(0, 0, 32, 32).data;
-    const v = [];
-    for (let i = 0; i < 128; i++) v.push((d[(i * 4) % d.length] - 127.5) / 127.5);
-    return l2Normalize(v);
+    const c = canvasRef.current, ctx = c.getContext("2d", { willReadFrequently: true });
+    c.width = EMB_SIZE; c.height = EMB_SIZE;
+    ctx.drawImage(videoRef.current, 0, 0, EMB_SIZE, EMB_SIZE);
+    return ctx.getImageData(0, 0, EMB_SIZE, EMB_SIZE);
   }, []);
+
+  const captureEmbedding = useCallback(() => {
+    const frame = captureFrame();
+    if (!frame) return null;
+    /* Update liveness */
+    const gray = toGray(frame.data, EMB_SIZE, EMB_SIZE);
+    const live = computeLiveness(prevGrayRef.current, gray, EMB_SIZE, EMB_SIZE);
+    prevGrayRef.current = gray;
+    setLiveness(live);
+    return extractEmbedding(frame.data, EMB_SIZE, EMB_SIZE);
+  }, [captureFrame]);
 
   /* Verify */
   const handleVerify = useCallback(() => {
     const emb = captureEmbedding();
     if (!emb) { toast("Inicie a câmera primeiro.", "error"); return; }
+    /* Liveness gate — block if motion/texture too low (possible photo/replay) */
+    if (liveness.level === "none" || liveness.level === "low") {
+      const dec = {
+        userId: null, userName: "desconhecido", userLevel: null, area, granted: false,
+        reason: "prova_de_vida_falhou", distance: null,
+        timestamp: new Date().toLocaleTimeString("pt-BR"),
+      };
+      setDecision(dec);
+      setAttempts(a => [dec, ...a].slice(0, 50));
+      setTimeout(() => setDecision(d => d === dec ? null : d), 4000);
+      return;
+    }
     const result = identify(emb, gallery, users);
     let granted = false, reason = result.reason;
     if (result.user) { granted = isAuthorized(result.user, area); reason = granted ? "autorizado" : "sem_autorizacao_nivel"; }
     const dec = {
       userId: result.user?.id || null, userName: result.user?.name || "desconhecido",
       userLevel: result.user?.level || null, area, granted, reason,
-      distance: result.dist, timestamp: new Date().toLocaleTimeString("pt-BR"),
+      distance: result.dist, liveness: liveness.level,
+      timestamp: new Date().toLocaleTimeString("pt-BR"),
     };
     setDecision(dec);
     setAttempts(a => [dec, ...a].slice(0, 50));
     setTimeout(() => setDecision(d => d === dec ? null : d), 4000);
-  }, [captureEmbedding, gallery, users, area, toast]);
+  }, [captureEmbedding, gallery, users, area, toast, liveness]);
 
   useEffect(() => {
     if (!cameraActive || tab !== "verificar" || users.length === 0) return;
@@ -611,14 +985,22 @@ function App() {
     return () => clearInterval(iv);
   }, [cameraActive, tab, handleVerify, users.length]);
 
-  /* Collect sample */
+  /* Collect sample — with variation check (anti-spoofing) */
   const collectSample = useCallback(() => {
     const e = captureEmbedding();
     if (!e) { toast("Inicie a câmera primeiro.", "error"); return; }
     if (samples.length >= 10) { toast("Limite de 10 amostras.", "error"); return; }
+    /* Check that sample differs enough from previous ones (defeats static photo) */
+    if (samples.length > 0) {
+      const lastDist = euclideanDist(e, samples[samples.length - 1]);
+      if (lastDist < 0.05) {
+        toast("Amostra muito similar à anterior. Mova ligeiramente o rosto.", "error");
+        return;
+      }
+    }
     setSamples(s => [...s, e]);
-    toast(`Amostra ${samples.length + 1} coletada`);
-  }, [captureEmbedding, samples, toast]);
+    toast(`Amostra ${samples.length + 1} coletada · liveness: ${liveness.level}`);
+  }, [captureEmbedding, samples, toast, liveness]);
 
   /* Register */
   const handleRegister = useCallback(() => {
@@ -663,7 +1045,7 @@ function App() {
           </svg>
         </div>
         <h1 className="header-title">Cofre Acadêmico</h1>
-        <span className="header-tag" aria-label="Status: protótipo">Protótipo</span>
+        <span className="header-tag" aria-label="Status: acadêmico">Acadêmico v2</span>
         <div className="header-spacer"/>
         <nav className="nav" aria-label="Navegação principal">
           {[
@@ -682,6 +1064,8 @@ function App() {
       </header>
 
       <canvas ref={canvasRef} style={{ display: "none" }} aria-hidden="true"/>
+      <input ref={importRef} type="file" accept=".json" onChange={handleImport}
+        style={{ display: "none" }} aria-hidden="true"/>
 
       <main id="main-content" className="layout">
         <section className="panel-main" aria-label="Painel de verificação">
@@ -703,6 +1087,10 @@ function App() {
                 <>
                   <video ref={videoRef} autoPlay playsInline muted aria-label="Feed da câmera ao vivo"/>
                   <span className="live-dot" aria-label="Câmera ao vivo">Ao vivo</span>
+                  <span className="liveness-badge" data-level={liveness.level}
+                    aria-label={`Prova de vida: ${liveness.level}`}>
+                    <Icon name="eye" size={11}/> {liveness.level === "high" ? "Vivo" : liveness.level === "medium" ? "Provável" : liveness.level === "low" ? "Suspeito" : "Sem dados"}
+                  </span>
                 </>
               ) : (
                 <figcaption className="video-empty">
@@ -872,8 +1260,37 @@ function App() {
               </button>
 
               <div className="caution" role="alert">
-                O operador deve garantir que todas as amostras são da mesma pessoa. Diferenças entre imagens não constituem prova de vida.
+                O sistema inclui detecção de vivacidade (motion + texture) e criptografia AES-256 dos embeddings. O operador deve garantir que as amostras são da mesma pessoa. Mova o rosto levemente entre coletas.
               </div>
+
+              <hr className="rule"/>
+
+              <h2 style={{ fontSize: 14, marginTop: 4 }}><Icon name="database" size={14}/> Banco de dados</h2>
+              <p className="form-note">
+                Dados persistidos via IndexedDB. Embeddings cifrados com AES-256-GCM (Web Crypto API).
+              </p>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <button type="button" className="btn btn-default" onClick={handleExport}
+                  style={{ flex: 1, justifyContent: "center", fontSize: 12 }}
+                  disabled={users.length === 0}>
+                  <Icon name="download" size={14}/> Exportar
+                </button>
+                <button type="button" className="btn btn-default" onClick={() => importRef.current?.click()}
+                  style={{ flex: 1, justifyContent: "center", fontSize: 12 }}>
+                  <Icon name="upload" size={14}/> Importar
+                </button>
+              </div>
+              <button type="button" className="btn-clear" onClick={handleClearDb}
+                disabled={users.length === 0 && attempts.length === 0}>
+                Limpar banco de dados
+              </button>
+              <p className="form-note" style={{ marginTop: 4 }}>
+                {dbReady
+                  ? <span style={{ color: "var(--success)" }}><Icon name="lock" size={12}/> AES-256 · IndexedDB · {users.length} usuários</span>
+                  : <span style={{ color: "var(--text-3)" }}>Conectando ao banco...</span>
+                }
+              </p>
             </form>
           </aside>
         )}
