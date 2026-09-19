@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Cofre Acadêmico — Sistema de controle de acesso por reconhecimento facial para o Ministério do Meio Ambiente (protótipo acadêmico).">
+<meta name="theme-color" content="#111214">
+<title>Cofre Acadêmico — Controle de Acesso</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23111214'/><path d='M16 8a5 5 0 015 5v2h1a1 1 0 011 1v7a1 1 0 01-1 1H10a1 1 0 01-1-1v-7a1 1 0 011-1h1v-2a5 5 0 015-5zm0 2a3 3 0 00-3 3v2h6v-2a3 3 0 00-3-3zm0 8a1.5 1.5 0 100 3 1.5 1.5 0 000-3z' fill='%2340c9a2'/></svg>">
+<link href="https://fonts.googleapis.com/css2?family=General+Sans:wght@400;500;600;700&family=Commit+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.9/babel.min.js"></script>
+<style>
+/* ===== Tokens ===== */
+:root {
+  --surface-0: #111214;
+  --surface-1: #18191c;
+  --surface-2: #1f2023;
+  --surface-3: #27282c;
+  --border: rgba(255,255,255,0.07);
+  --border-focus: rgba(255,255,255,0.16);
+  --accent: #40c9a2;
+  --accent-dim: rgba(64,201,162,0.12);
+  --accent-hover: #5ad4b3;
+  --success: #3ec97e;
+  --success-surface: rgba(62,201,126,0.08);
+  --danger: #e55a5a;
+  --danger-surface: rgba(229,90,90,0.08);
+  --warning: #e5a93e;
+  --warning-surface: rgba(229,169,62,0.08);
+  --text-1: #ededef;
+  --text-2: #a0a1a6;
+  --text-3: #6b6c72;
+  --radius: 4px;
+  --radius-lg: 6px;
+  --font: 'General Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --mono: 'Commit Mono', 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  --gutter: 20px;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ===== Light mode ===== */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --surface-0: #f5f5f4;
+    --surface-1: #ffffff;
+    --surface-2: #f0efed;
+    --surface-3: #e7e5e2;
+    --border: rgba(0,0,0,0.08);
+    --border-focus: rgba(0,0,0,0.2);
+    --accent: #1a9e7a;
+    --accent-dim: rgba(26,158,122,0.08);
+    --accent-hover: #16b68a;
+    --success: #1a8a52;
+    --success-surface: rgba(26,138,82,0.06);
+    --danger: #c43c3c;
+    --danger-surface: rgba(196,60,60,0.06);
+    --warning: #a67a1a;
+    --warning-surface: rgba(166,122,26,0.06);
+    --text-1: #1a1a1c;
+    --text-2: #5a5a60;
+    --text-3: #8e8e96;
+  }
+}
+:root[data-theme="dark"] {
+  --surface-0: #111214;
+  --surface-1: #18191c;
+  --surface-2: #1f2023;
+  --surface-3: #27282c;
+  --border: rgba(255,255,255,0.07);
+  --border-focus: rgba(255,255,255,0.16);
+  --text-1: #ededef;
+  --text-2: #a0a1a6;
+  --text-3: #6b6c72;
+}
+
+/* ===== Reset ===== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font: 400 14px/1.55 var(--font);
+  background: var(--surface-0);
+  color: var(--text-1);
+  min-height: 100vh;
+  -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ===== Themed browser surfaces ===== */
+::selection { background: var(--accent-dim); color: var(--text-1); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+input, select, textarea { caret-color: var(--accent); }
+
+/* ===== Skip link ===== */
+.skip-link {
+  position: absolute; top: -100%; left: var(--gutter);
+  background: var(--accent); color: var(--surface-0);
+  padding: 8px 16px; border-radius: var(--radius);
+  font: 600 13px/1 var(--font);
+  z-index: 1000; text-decoration: none;
+}
+.skip-link:focus { top: 8px; }
+
+/* ===== Shell ===== */
+.shell { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+/* ===== Header ===== */
+.header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 var(--gutter); height: 52px; flex-shrink: 0;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+}
+.header-mark {
+  width: 26px; height: 26px; flex-shrink: 0;
+}
+.header-mark svg { width: 100%; height: 100%; display: block; }
+.header-title {
+  font: 600 14px/1 var(--font);
+  letter-spacing: -0.02em;
+  color: var(--text-1);
+}
+.header-tag {
+  font: 500 10px/1 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 7px;
+  border-radius: var(--radius);
+  background: var(--warning-surface);
+  color: var(--warning);
+}
+.header-spacer { flex: 1; }
+.nav { display: flex; gap: 1px; }
+.nav-btn {
+  background: transparent; border: none; color: var(--text-3);
+  padding: 7px 12px; border-radius: var(--radius); cursor: pointer;
+  font: 500 13px/1 var(--font); transition: color 0.15s var(--ease);
+  display: flex; align-items: center; gap: 6px;
+}
+.nav-btn:hover { color: var(--text-1); }
+.nav-btn[aria-current="page"] {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.nav-btn svg { width: 15px; height: 15px; flex-shrink: 0; }
+
+/* ===== Layout ===== */
+.layout { flex: 1; display: flex; overflow: hidden; }
+.panel-main {
+  flex: 1; display: flex; flex-direction: column;
+  padding: var(--gutter); gap: 14px; overflow-y: auto;
+}
+.panel-side {
+  width: 360px; flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface-1);
+  overflow-y: auto;
+}
+
+/* ===== Section blocks ===== */
+.block {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.block-head {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font: 500 12px/1 var(--font);
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+}
+.block-body { padding: 16px; }
+
+/* ===== Video ===== */
+.video-frame {
+  position: relative; background: var(--surface-0); border-radius: var(--radius);
+  aspect-ratio: 16/10; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.video-frame video {
+  width: 100%; height: 100%; object-fit: cover;
+  transform: scaleX(-1);
+}
+.video-empty {
+  text-align: center; color: var(--text-3); font-size: 13px;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+.video-empty svg { width: 36px; height: 36px; opacity: 0.4; }
+.live-dot {
+  position: absolute; top: 10px; left: 10px;
+  display: flex; align-items: center; gap: 5px;
+  font: 500 10px/1 var(--mono); letter-spacing: 0.08em;
+  text-transform: uppercase; color: #fff;
+  background: rgba(229,90,90,0.85);
+  padding: 4px 8px; border-radius: var(--radius);
+  backdrop-filter: blur(4px);
+}
+.live-dot::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%;
+  background: #fff;
+  animation: pulse 1.6s var(--ease) infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* ===== Area selector ===== */
+.areas {
+  display: flex; gap: 4px; flex-wrap: wrap;
+  border: none; padding: 0;
+}
+.areas legend {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip: rect(0,0,0,0);
+}
+.area-chip {
+  background: var(--surface-2); border: 1px solid var(--border);
+  color: var(--text-2); padding: 6px 12px;
+  border-radius: var(--radius); cursor: pointer;
+  font: 500 12px/1 var(--font);
+  transition: border-color 0.15s var(--ease), color 0.15s var(--ease);
+  display: flex; align-items: center; gap: 6px;
+}
+.area-chip svg { width: 14px; height: 14px; opacity: 0.6; }
+.area-chip:hover { border-color: var(--border-focus); color: var(--text-1); }
+.area-chip[aria-pressed="true"] {
+  background: var(--accent-dim); border-color: var(--accent);
+  color: var(--accent);
+}
+.area-chip[aria-pressed="true"] svg { opacity: 1; }
+
+/* ===== Controls ===== */
+.controls { display: flex; gap: 6px; flex-wrap: wrap; }
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 8px 14px; cursor: pointer;
+  font: 500 12px/1 var(--font);
+  transition: all 0.15s var(--ease);
+  touch-action: manipulation;
+}
+.btn svg { width: 14px; height: 14px; }
+.btn-default { background: var(--surface-2); color: var(--text-1); }
+.btn-default:hover { border-color: var(--border-focus); }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--surface-0); }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-stop { background: var(--danger-surface); border-color: var(--danger); color: var(--danger); }
+.btn-stop:hover { background: var(--danger); color: #fff; }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
+
+/* ===== Decision banner — the one authored motion ===== */
+.verdict {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 18px; border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  transition: background 0.4s var(--ease), border-color 0.4s var(--ease);
+}
+.verdict[data-result="granted"] {
+  background: var(--success-surface); border-color: var(--success);
+  animation: verdict-flash 0.5s var(--ease);
+}
+.verdict[data-result="denied"] {
+  background: var(--danger-surface); border-color: var(--danger);
+  animation: verdict-flash 0.5s var(--ease);
+}
+@keyframes verdict-flash {
+  0% { transform: scale(1); }
+  20% { transform: scale(1.008); }
+  100% { transform: scale(1); }
+}
+.verdict-icon {
+  width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font: 700 16px/1 var(--font);
+}
+.verdict[data-result="granted"] .verdict-icon { background: var(--success); color: var(--surface-0); }
+.verdict[data-result="denied"] .verdict-icon { background: var(--danger); color: #fff; }
+.verdict[data-result="idle"] .verdict-icon { background: var(--surface-3); color: var(--text-3); }
+.verdict-body h2 { font: 600 14px/1.2 var(--font); }
+.verdict-body p { font-size: 12px; color: var(--text-2); margin-top: 2px; }
+.verdict[data-result="granted"] .verdict-body h2 { color: var(--success); }
+.verdict[data-result="denied"] .verdict-body h2 { color: var(--danger); }
+
+/* ===== Log ===== */
+.log { display: flex; flex-direction: column; gap: 2px; max-height: 200px; overflow-y: auto; }
+.log-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border-radius: var(--radius);
+  font-size: 12px; background: var(--surface-2);
+}
+.log-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.log-dot[data-ok="true"] { background: var(--success); }
+.log-dot[data-ok="false"] { background: var(--danger); }
+.log-time { color: var(--text-3); font: 400 11px/1 var(--mono); flex-shrink: 0; }
+.log-msg { color: var(--text-2); flex: 1; min-width: 0; overflow-wrap: break-word; }
+
+/* ===== Form ===== */
+.form-panel { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.form-panel h2 { font: 600 15px/1.2 var(--font); }
+.form-note { font-size: 12px; color: var(--text-3); line-height: 1.5; }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field-label { font: 500 12px/1 var(--font); color: var(--text-2); }
+.field-input {
+  background: var(--surface-0); border: 1px solid var(--border);
+  color: var(--text-1); padding: 9px 12px; border-radius: var(--radius);
+  font: 400 13px/1.4 var(--font); width: 100%;
+  transition: border-color 0.15s var(--ease);
+}
+.field-input:focus { border-color: var(--accent); outline: none; }
+.field-input::placeholder { color: var(--text-3); }
+select.field-input { cursor: pointer; }
+
+.check-label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--text-2); cursor: pointer;
+}
+.check-label input[type="checkbox"] {
+  accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer;
+}
+
+.rule { height: 1px; background: var(--border); }
+
+.progress-bar { height: 4px; background: var(--surface-0); border-radius: 2px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s var(--ease); }
+.progress-label { font-size: 12px; color: var(--text-3); text-align: center; }
+
+.btn-submit {
+  width: 100%; padding: 10px; border: none; border-radius: var(--radius);
+  font: 600 13px/1 var(--font); cursor: pointer;
+  background: var(--accent); color: var(--surface-0);
+  transition: background 0.15s var(--ease);
+}
+.btn-submit:hover { background: var(--accent-hover); }
+.btn-submit:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.btn-clear {
+  width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius);
+  font: 500 13px/1 var(--font); cursor: pointer;
+  background: transparent; color: var(--text-2);
+  transition: all 0.15s var(--ease);
+}
+.btn-clear:hover { border-color: var(--danger); color: var(--danger); }
+
+.btn-remove {
+  background: transparent; border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 4px 10px; cursor: pointer; font: 500 11px/1 var(--font);
+  color: var(--text-3); flex-shrink: 0;
+  transition: all 0.15s var(--ease);
+}
+.btn-remove:hover { border-color: var(--danger); color: var(--danger); }
+
+.caution {
+  padding: 10px 14px; border-radius: var(--radius);
+  background: var(--warning-surface);
+  border: 1px solid rgba(229,169,62,0.15);
+  font-size: 12px; color: var(--warning); line-height: 1.5;
+}
+
+/* ===== Toast ===== */
+.toasts {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  z-index: 999; display: flex; flex-direction: column; gap: 6px;
+  align-items: center; width: calc(100% - 2 * var(--gutter)); max-width: 380px;
+  pointer-events: none;
+}
+.toast {
+  padding: 10px 18px; border-radius: var(--radius);
+  font: 500 13px/1.3 var(--font); color: #fff;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.35);
+  animation: toast-up 0.3s var(--ease);
+  text-align: center;
+}
+.toast[data-t="success"] { background: var(--success); }
+.toast[data-t="error"] { background: var(--danger); }
+@keyframes toast-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ===== Responsive: tablet ===== */
+@media (max-width: 900px) {
+  .layout { flex-direction: column; }
+  .panel-side {
+    width: 100%; border-left: none;
+    border-top: 1px solid var(--border);
+    max-height: 50vh;
+  }
+  .nav-btn .nav-label { display: none; }
+}
+
+/* ===== Responsive: mobile ===== */
+@media (max-width: 600px) {
+  :root { --gutter: 14px; }
+  .header { height: 46px; gap: 8px; }
+  .header-title { font-size: 13px; }
+  .header-tag { font-size: 9px; padding: 2px 5px; }
+  .nav-btn { padding: 6px 8px; font-size: 12px; }
+  .video-frame { aspect-ratio: 4/3; }
+  .areas { gap: 3px; }
+  .area-chip { padding: 5px 9px; font-size: 11px; }
+  .controls { flex-direction: column; }
+  .btn { width: 100%; justify-content: center; padding: 10px; }
+  .verdict { padding: 12px; gap: 10px; }
+  .verdict-icon { width: 28px; height: 28px; font-size: 13px; }
+  .verdict-body h2 { font-size: 13px; }
+  .panel-side { max-height: 60vh; }
+  .form-panel { padding: 16px; gap: 12px; }
+  .log-row { padding: 5px 8px; gap: 5px; font-size: 11px; }
+}
+
+/* ===== Very small ===== */
+@media (max-width: 380px) {
+  .header-tag { display: none; }
+  .area-chip { flex: 1 1 calc(50% - 3px); justify-content: center; }
+}
+</style>
+</head>
+<body>
+<a href="#main-content" class="skip-link">Pular para o conteúdo principal</a>
+<div id="root"></div>
+<script type="text/babel">
+
+const { useState, useRef, useEffect, useCallback } = React;
+
+/* ================================================================ */
+/* SVG Icons — inline, one stroke weight, one system                */
+/* ================================================================ */
+const Icon = ({ name, size = 15, ...props }) => {
+  const paths = {
+    scan: <><path d="M4 8V5a1 1 0 011-1h3M20 8V5a1 1 0 00-1-1h-3M4 16v3a1 1 0 001 1h3M20 16v3a1 1 0 01-1 1h-3" strokeLinecap="round"/><circle cx="12" cy="12" r="3"/></>,
+    user: <><circle cx="12" cy="8" r="3.5"/><path d="M5.5 20a6.5 6.5 0 0113 0"/></>,
+    clock: <><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 3" strokeLinecap="round"/></>,
+    camera: <><path d="M2 9a2 2 0 012-2h2l1.5-2h5L14 7h2a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V9z"/><circle cx="10" cy="13" r="3"/></>,
+    play: <polygon points="6,4 20,12 6,20"/>,
+    stop: <rect x="5" y="5" width="14" height="14" rx="1"/>,
+    check: <polyline points="5,12 10,17 19,7" strokeLinecap="round" strokeLinejoin="round"/>,
+    x: <><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></>,
+    shield: <path d="M12 3l7 3.5v5c0 4.5-3 8-7 9.5-4-1.5-7-5-7-9.5v-5L12 3z"/>,
+    file: <><path d="M6 4h8l4 4v11a1 1 0 01-1 1H6a1 1 0 01-1-1V5a1 1 0 011-1z"/><path d="M14 4v4h4"/></>,
+    alert: <><path d="M12 3l9 16H3L12 3z"/><line x1="12" y1="10" x2="12" y2="13"/><circle cx="12" cy="16" r="0.5"/></>,
+    building: <><rect x="4" y="3" width="16" height="18" rx="1"/><path d="M9 21v-4h6v4"/><rect x="8" y="7" width="2" height="2" rx="0.5"/><rect x="14" y="7" width="2" height="2" rx="0.5"/><rect x="8" y="12" width="2" height="2" rx="0.5"/><rect x="14" y="12" width="2" height="2" rx="0.5"/></>,
+    minus: <line x1="6" y1="12" x2="18" y2="12" strokeLinecap="round"/>,
+  };
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="1.8" {...props}>
+      {paths[name]}
+    </svg>
+  );
+};
+
+/* ================================================================ */
+/* Business logic                                                    */
+/* ================================================================ */
+
+const AREAS = {
+  geral:        { name: "Consulta geral",            level: 1, division: "", icon: "file" },
+  toxinas:      { name: "Registros de toxinas",       level: 2, division: "Toxinas", icon: "alert" },
+  fiscalizacao: { name: "Registros de fiscalização",  level: 2, division: "Fiscalização", icon: "scan" },
+  ministerial:  { name: "Gabinete ministerial",       level: 3, division: "", icon: "building" },
+};
+
+function isAuthorized(user, areaKey) {
+  const area = AREAS[areaKey];
+  if (!area || !user) return false;
+  if (user.level === 3) return true;
+  if (user.level === 2) {
+    if (area.level === 1) return true;
+    return area.level === 2 && user.division === area.division;
+  }
+  return area.level === 1;
+}
+
+function euclideanDist(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += (a[i] - b[i]) ** 2;
+  return Math.sqrt(sum);
+}
+
+function l2Normalize(v) {
+  const norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+  return norm === 0 ? v : v.map(x => x / norm);
+}
+
+function identify(query, gallery, users, threshold = 0.8, margin = 0.1) {
+  const qNorm = l2Normalize(query);
+  const candidates = [];
+  for (const [userId, vectors] of Object.entries(gallery)) {
+    const best = Math.min(...vectors.map(v => euclideanDist(qNorm, l2Normalize(v))));
+    candidates.push({ userId, dist: best });
+  }
+  candidates.sort((a, b) => a.dist - b.dist);
+  if (candidates.length === 0) return { user: null, dist: null, reason: "galeria_vazia" };
+  const best = candidates[0];
+  if (best.dist > threshold) return { user: null, dist: best.dist, reason: "desconhecido" };
+  if (candidates.length >= 2 && (candidates[1].dist - best.dist) < margin)
+    return { user: null, dist: best.dist, reason: "identidade_ambigua" };
+  const u = users.find(u => u.id === best.userId);
+  return u ? { user: u, dist: best.dist, reason: "identificado" } : { user: null, dist: best.dist, reason: "desconhecido" };
+}
+
+/* ================================================================ */
+/* Toast                                                             */
+/* ================================================================ */
+function Toasts({ items }) {
+  return (
+    <aside className="toasts" aria-live="polite" aria-label="Notificações">
+      {items.map(t => (
+        <output key={t.id} className="toast" data-t={t.type} role="status">{t.msg}</output>
+      ))}
+    </aside>
+  );
+}
+
+/* ================================================================ */
+/* App                                                               */
+/* ================================================================ */
+function App() {
+  const [tab, setTab] = useState("verificar");
+  const [users, setUsers] = useState([]);
+  const [gallery, setGallery] = useState({});
+  const [attempts, setAttempts] = useState([]);
+
+  const [area, setArea] = useState("geral");
+  const [cameraActive, setCameraActive] = useState(false);
+  const [decision, setDecision] = useState(null);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const canvasRef = useRef(null);
+
+  const [regId, setRegId] = useState("");
+  const [regName, setRegName] = useState("");
+  const [regLevel, setRegLevel] = useState(1);
+  const [regDivision, setRegDivision] = useState("");
+  const [regConsent, setRegConsent] = useState(false);
+  const [samples, setSamples] = useState([]);
+
+  const [toasts, setToasts] = useState([]);
+  const tid = useRef(0);
+  const toast = useCallback((msg, type = "success") => {
+    const id = ++tid.current;
+    setToasts(t => [...t, { id, msg, type }]);
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3000);
+  }, []);
+
+  /* Camera */
+  const startCamera = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }
+      });
+      streamRef.current = stream;
+      if (videoRef.current) { videoRef.current.srcObject = stream; videoRef.current.play(); }
+      setCameraActive(true);
+    } catch { toast("Câmera indisponível. Verifique as permissões.", "error"); }
+  }, [toast]);
+
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+    setCameraActive(false);
+  }, []);
+
+  useEffect(() => () => stopCamera(), [stopCamera]);
+  useEffect(() => { startCamera(); }, []);
+  useEffect(() => {
+    if (cameraActive && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().catch(() => {});
+    }
+  }, [cameraActive]);
+
+  /* Embedding */
+  const captureEmbedding = useCallback(() => {
+    if (!videoRef.current || !canvasRef.current) return null;
+    const c = canvasRef.current, ctx = c.getContext("2d");
+    c.width = 32; c.height = 32;
+    ctx.drawImage(videoRef.current, 0, 0, 32, 32);
+    const d = ctx.getImageData(0, 0, 32, 32).data;
+    const v = [];
+    for (let i = 0; i < 128; i++) v.push((d[(i * 4) % d.length] - 127.5) / 127.5);
+    return l2Normalize(v);
+  }, []);
+
+  /* Verify */
+  const handleVerify = useCallback(() => {
+    const emb = captureEmbedding();
+    if (!emb) { toast("Inicie a câmera primeiro.", "error"); return; }
+    const result = identify(emb, gallery, users);
+    let granted = false, reason = result.reason;
+    if (result.user) { granted = isAuthorized(result.user, area); reason = granted ? "autorizado" : "sem_autorizacao_nivel"; }
+    const dec = {
+      userId: result.user?.id || null, userName: result.user?.name || "desconhecido",
+      userLevel: result.user?.level || null, area, granted, reason,
+      distance: result.dist, timestamp: new Date().toLocaleTimeString("pt-BR"),
+    };
+    setDecision(dec);
+    setAttempts(a => [dec, ...a].slice(0, 50));
+    setTimeout(() => setDecision(d => d === dec ? null : d), 4000);
+  }, [captureEmbedding, gallery, users, area, toast]);
+
+  useEffect(() => {
+    if (!cameraActive || tab !== "verificar" || users.length === 0) return;
+    const iv = setInterval(handleVerify, 2500);
+    return () => clearInterval(iv);
+  }, [cameraActive, tab, handleVerify, users.length]);
+
+  /* Collect sample */
+  const collectSample = useCallback(() => {
+    const e = captureEmbedding();
+    if (!e) { toast("Inicie a câmera primeiro.", "error"); return; }
+    if (samples.length >= 10) { toast("Limite de 10 amostras.", "error"); return; }
+    setSamples(s => [...s, e]);
+    toast(`Amostra ${samples.length + 1} coletada`);
+  }, [captureEmbedding, samples, toast]);
+
+  /* Register */
+  const handleRegister = useCallback(() => {
+    const id = regId.trim(), name = regName.trim();
+    if (!id || !name) { toast("ID e nome são obrigatórios.", "error"); return; }
+    if (id === "desconhecido") { toast("ID 'desconhecido' é reservado.", "error"); return; }
+    if (!regConsent) { toast("Marque o consentimento.", "error"); return; }
+    if (samples.length < 3) { toast("Colete pelo menos 3 amostras.", "error"); return; }
+    if (regLevel === 2 && !regDivision) { toast("Divisão obrigatória para nível 2.", "error"); return; }
+    if (users.find(u => u.id === id)) { toast("ID já cadastrado.", "error"); return; }
+    if (regLevel === 3 && users.find(u => u.level === 3)) { toast("Já existe um ministro cadastrado.", "error"); return; }
+    setUsers(u => [...u, { id, name, level: regLevel, division: regLevel === 2 ? regDivision : "" }]);
+    setGallery(g => ({ ...g, [id]: [...samples] }));
+    setSamples([]); setRegId(""); setRegName(""); setRegLevel(1); setRegDivision(""); setRegConsent(false);
+    toast(`${name} cadastrado com sucesso!`);
+  }, [regId, regName, regLevel, regDivision, regConsent, samples, users, toast]);
+
+  /* Remove user */
+  const handleRemove = useCallback((uid, uname) => {
+    if (!confirm(`Remover "${uname}" (${uid})? Esta ação não pode ser desfeita.`)) return;
+    setUsers(u => u.filter(x => x.id !== uid));
+    setGallery(g => { const n = { ...g }; delete n[uid]; return n; });
+    toast(`${uname} removido com sucesso.`);
+  }, [toast]);
+
+  /* Decision */
+  const decResult = decision ? (decision.granted ? "granted" : "denied") : "idle";
+  const decTitle = decision
+    ? (decision.granted ? "Acesso permitido — somente simulação" : "Acesso negado")
+    : "Aguardando verificação";
+  const decDetail = decision
+    ? `${decision.reason}${decision.distance != null ? `  ·  dist: ${decision.distance.toFixed(4)}` : ""}${decision.userName !== "desconhecido" ? `  ·  ${decision.userName}` : ""}`
+    : "Selecione uma área e inicie a câmera";
+
+  return (
+    <div className="shell">
+      <header className="header" role="banner">
+        <div className="header-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" fill="none">
+            <rect width="32" height="32" rx="6" fill="var(--accent-dim)"/>
+            <path d="M16 8a5 5 0 015 5v2h1a1 1 0 011 1v7a1 1 0 01-1 1H10a1 1 0 01-1-1v-7a1 1 0 011-1h1v-2a5 5 0 015-5zm0 2a3 3 0 00-3 3v2h6v-2a3 3 0 00-3-3zm0 8a1.5 1.5 0 100 3 1.5 1.5 0 000-3z" fill="var(--accent)"/>
+          </svg>
+        </div>
+        <h1 className="header-title">Cofre Acadêmico</h1>
+        <span className="header-tag" aria-label="Status: protótipo">Protótipo</span>
+        <div className="header-spacer"/>
+        <nav className="nav" aria-label="Navegação principal">
+          {[
+            { id: "verificar", icon: "scan", label: "Verificar" },
+            { id: "cadastrar", icon: "user", label: "Cadastrar" },
+            { id: "historico", icon: "clock", label: "Histórico" },
+          ].map(n => (
+            <button key={n.id} className="nav-btn"
+              aria-current={tab === n.id ? "page" : undefined}
+              onClick={() => setTab(n.id)}>
+              <Icon name={n.icon}/>
+              <span className="nav-label">{n.label}</span>
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      <canvas ref={canvasRef} style={{ display: "none" }} aria-hidden="true"/>
+
+      <main id="main-content" className="layout">
+        <section className="panel-main" aria-label="Painel de verificação">
+
+          <fieldset className="areas">
+            <legend>Selecione a área de acesso</legend>
+            {Object.entries(AREAS).map(([key, a]) => (
+              <button key={key} className="area-chip"
+                aria-pressed={area === key}
+                onClick={() => { setArea(key); setDecision(null); }}>
+                <Icon name={a.icon} size={14}/> {a.name}
+              </button>
+            ))}
+          </fieldset>
+
+          <div className="block" style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+            <figure className="video-frame" style={{ flex: 1 }}>
+              {cameraActive ? (
+                <>
+                  <video ref={videoRef} autoPlay playsInline muted aria-label="Feed da câmera ao vivo"/>
+                  <span className="live-dot" aria-label="Câmera ao vivo">Ao vivo</span>
+                </>
+              ) : (
+                <figcaption className="video-empty">
+                  <Icon name="camera" size={36}/>
+                  <span>Câmera inativa</span>
+                </figcaption>
+              )}
+            </figure>
+          </div>
+
+          <div className="controls" role="toolbar" aria-label="Controles da câmera">
+            {!cameraActive
+              ? <button className="btn btn-primary" onClick={startCamera}><Icon name="play"/> Iniciar câmera</button>
+              : <button className="btn btn-stop" onClick={stopCamera}><Icon name="stop"/> Parar</button>
+            }
+            <button className="btn btn-default" onClick={handleVerify} disabled={!cameraActive}>
+              <Icon name="scan"/> Verificar agora
+            </button>
+          </div>
+
+          <output className="verdict" data-result={decResult} role="status" aria-live="polite" key={decision?.timestamp || "idle"}>
+            <span className="verdict-icon" aria-hidden="true">
+              {decResult === "granted" ? "✓" : decResult === "denied" ? "✕" : "—"}
+            </span>
+            <div className="verdict-body">
+              <h2>{decTitle}</h2>
+              <p>{decDetail}</p>
+            </div>
+          </output>
+
+          {tab === "verificar" && attempts.length > 0 && (
+            <section className="block" aria-label="Últimas tentativas">
+              <div className="block-head">Últimas tentativas</div>
+              <div className="block-body">
+                <ul className="log" role="list">
+                  {attempts.slice(0, 8).map((a, i) => (
+                    <li key={i} className="log-row">
+                      <span className="log-dot" data-ok={String(a.granted)} aria-hidden="true"/>
+                      <time className="log-time">{a.timestamp}</time>
+                      <span className="log-msg">{a.userName} → {a.area} — {a.reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </section>
+          )}
+
+          {tab === "historico" && (
+            <section className="block" style={{ flex: 1 }} aria-label="Histórico completo">
+              <div className="block-head">Histórico completo · {attempts.length} registros</div>
+              <div className="block-body">
+                {attempts.length === 0
+                  ? <p style={{ color: "var(--text-3)", fontSize: 13 }}>Nenhuma tentativa registrada.</p>
+                  : <ul className="log" style={{ maxHeight: "none" }} role="list">
+                      {attempts.map((a, i) => (
+                        <li key={i} className="log-row">
+                          <span className="log-dot" data-ok={String(a.granted)} aria-hidden="true"/>
+                          <time className="log-time">{a.timestamp}</time>
+                          <span className="log-msg">
+                            <strong>{a.userName}</strong> → {a.area} — {a.granted ? "Permitido" : "Negado"} ({a.reason})
+                            {a.distance != null && <span style={{ color: "var(--text-3)" }}> dist: {a.distance.toFixed(4)}</span>}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                }
+              </div>
+            </section>
+          )}
+
+          {tab === "cadastrar" && users.length > 0 && (
+            <section className="block" aria-label="Usuários cadastrados">
+              <div className="block-head">Usuários cadastrados · {users.length}</div>
+              <div className="block-body">
+                <ul className="log" style={{ maxHeight: "none" }} role="list">
+                  {users.map(u => (
+                    <li key={u.id} className="log-row" style={{ justifyContent: "space-between" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+                        <span className="log-dot" data-ok="true" aria-hidden="true"/>
+                        <span className="log-msg">
+                          <strong>{u.name}</strong> ({u.id}) — Nível {u.level}
+                          {u.division && ` · ${u.division}`}
+                          {` · ${(gallery[u.id] || []).length} amostras`}
+                        </span>
+                      </div>
+                      <button className="btn-remove" onClick={() => handleRemove(u.id, u.name)}
+                        aria-label={`Remover ${u.name}`}>Remover</button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </section>
+          )}
+        </section>
+
+        {tab === "cadastrar" && (
+          <aside className="panel-side" aria-label="Formulário de cadastro">
+            <form className="form-panel" onSubmit={e => { e.preventDefault(); handleRegister(); }}>
+              <h2>Cadastro de usuário</h2>
+              <p className="form-note">
+                Sem login administrativo. Pressupõe-se operador local confiável, fisicamente presente junto ao equipamento.
+              </p>
+
+              <div className="field">
+                <label className="field-label" htmlFor="reg-id">ID do usuário</label>
+                <input id="reg-id" className="field-input" placeholder="ex.: ana.souza"
+                  value={regId} onChange={e => { setRegId(e.target.value); setSamples([]); }} autoComplete="off"/>
+              </div>
+
+              <div className="field">
+                <label className="field-label" htmlFor="reg-name">Nome completo</label>
+                <input id="reg-name" className="field-input" placeholder="ex.: Ana Souza"
+                  value={regName} onChange={e => { setRegName(e.target.value); setSamples([]); }} autoComplete="off"/>
+              </div>
+
+              <div className="field">
+                <label className="field-label" htmlFor="reg-level">Nível de acesso</label>
+                <select id="reg-level" className="field-input" value={regLevel}
+                  onChange={e => { setRegLevel(Number(e.target.value)); setSamples([]); }}>
+                  <option value={1}>1 — Básico</option>
+                  <option value={2}>2 — Diretor</option>
+                  <option value={3}>3 — Ministro</option>
+                </select>
+              </div>
+
+              {regLevel === 2 && (
+                <div className="field">
+                  <label className="field-label" htmlFor="reg-div">Divisão</label>
+                  <select id="reg-div" className="field-input" value={regDivision}
+                    onChange={e => setRegDivision(e.target.value)}>
+                    <option value="">Selecione...</option>
+                    <option value="Toxinas">Toxinas</option>
+                    <option value="Fiscalização">Fiscalização</option>
+                  </select>
+                </div>
+              )}
+
+              <label className="check-label" htmlFor="reg-consent">
+                <input id="reg-consent" type="checkbox" checked={regConsent}
+                  onChange={e => setRegConsent(e.target.checked)}/>
+                Consentimento explícito do titular obtido
+              </label>
+
+              <hr className="rule"/>
+
+              <h2 style={{ fontSize: 14, marginTop: 4 }}>Coleta de amostras</h2>
+
+              <button type="button" className="btn btn-primary" onClick={collectSample}
+                disabled={!cameraActive} style={{ width: "100%", justifyContent: "center" }}>
+                <Icon name="camera"/> Coletar frame da webcam
+              </button>
+
+              <div className="progress-bar" role="progressbar"
+                aria-valuenow={samples.length} aria-valuemin={0} aria-valuemax={3}
+                aria-label="Amostras coletadas">
+                <div className="progress-fill" style={{ width: `${Math.min((samples.length / 3) * 100, 100)}%` }}/>
+              </div>
+              <p className="progress-label">{samples.length} / 3 amostras coletadas</p>
+
+              <button type="submit" className="btn-submit"
+                disabled={samples.length < 3 || !regConsent || !regId.trim() || !regName.trim()}>
+                Cadastrar usuário
+              </button>
+
+              <button type="button" className="btn-clear" onClick={() => setSamples([])}>
+                Limpar amostras
+              </button>
+
+              <div className="caution" role="alert">
+                O operador deve garantir que todas as amostras são da mesma pessoa. Diferenças entre imagens não constituem prova de vida.
+              </div>
+            </form>
+          </aside>
+        )}
+      </main>
+
+      <Toasts items={toasts}/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>

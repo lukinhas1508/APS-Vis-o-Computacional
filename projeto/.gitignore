@@ -1,0 +1,25 @@
+# Ambientes virtuais
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Dados locais e artefatos gerados em execução
+data/*.sqlite3
+data/*.sqlite3-journal
+models/*.h5
+reports/
+avaliacao/*.json
+avaliacao/*.csv
+avaliacao/*.png
+
+# Arquivos temporários de download
+*.tmp
+*.download
+
+# Editor / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
