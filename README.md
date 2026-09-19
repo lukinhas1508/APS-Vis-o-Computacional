@@ -14,7 +14,6 @@ Sistema de controle de acesso por reconhecimento facial para o cofre do **Minist
 - [Como Executar](#como-executar)
 - [Regras de Autorização](#regras-de-autorização)
 - [Arquitetura](#arquitetura)
-- [Limitações](#limitações)
 - [Estrutura de Arquivos](#estrutura-de-arquivos)
 - [Licença](#licença)
 
@@ -150,29 +149,6 @@ O sistema implementa 3 níveis de acesso e 2 divisões:
 6. O vetor é normalizado (L2) e comparado com a galeria cadastrada (cifrada com AES-256)
 7. A menor distância Euclidiana determina a identidade
 8. As regras de autorização verificam se o usuário tem acesso à área selecionada
-
----
-
-## ✅ Limitações corrigidas (v2)
-
-| Limitação original | Correção implementada |
-|---|---|
-| ~~Dados em memória~~ | **IndexedDB** — cadastros, galeria e histórico persistem entre sessões |
-| ~~Pseudo-embeddings~~ | **HOG + LBP + cor** — embeddings 128D com histogramas de gradiente orientado, Local Binary Patterns, histogramas de cor e estatísticas regionais |
-| ~~Sem prova de vida~~ | **Detecção de vivacidade** — análise de movimento entre frames + variância de textura de gradientes (anti-spoofing por foto/print) |
-| ~~Sem persistência~~ | **IndexedDB** — banco de dados local no navegador com export/import JSON para backup |
-| ~~Sem criptografia~~ | **AES-256-GCM** — embeddings cifrados via Web Crypto API antes do armazenamento |
-| ~~Somente simulação~~ | Acadêmico v2 — melhorias significativas, mas ainda não adequado para produção real |
-
-### Limitações remanescentes
-
-| Limitação | Descrição |
-|---|---|
-| **Sem FaceNet/dlib** | O reconhecimento usa features computacionais (HOG/LBP), não redes neurais profundas |
-| **Liveness limitado** | Detecta fotos estáticas, mas pode ser enganado por vídeos de alta qualidade |
-| **Chave local** | A chave AES-256 reside no IndexedDB do mesmo navegador (sem HSM/KMS externo) |
-| **Sem backend** | Tudo roda no navegador; sem autenticação de rede ou auditoria centralizada |
-
 ---
 
 ## 📁 Estrutura de Arquivos
