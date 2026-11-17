@@ -5,9 +5,9 @@
 > toxinas. Ele **não aciona fechaduras físicas reais**, **não acessa
 > sistemas governamentais reais** e **não utiliza documentos reais** do
 > Ministério. Todas as liberações de acesso mostradas pelo sistema são
-> **simuladas**. Não há prova de vida nem login administrativo: o cadastro
-> pressupõe um operador local confiável, fisicamente presente junto ao
-> computador.
+> **simuladas**. O acesso exige **prova de vida ativa pela webcam** (ver
+> seção "Prova de vida"). Não há login administrativo: o cadastro pressupõe
+> um operador local confiável, fisicamente presente junto ao computador.
 
 ## 1. Requisitos
 
@@ -84,12 +84,30 @@ python3 cofre.py gui --camera 0
   histórico de tentativas. É possível exportar o histórico para CSV.
 - **Painel direito**: cadastro administrativo local. Preencha ID, nome,
   nível (1 a 3) e, se o nível for 2, a divisão (Toxinas ou Fiscalização).
-  Marque o consentimento explícito do titular antes de cadastrar. Colete ao
-  menos três amostras (por webcam) da **mesma pessoa** — diferenças entre
-  as imagens **não constituem prova de vida**.
+  Marque o consentimento explícito do titular antes de cadastrar. Conclua a
+  prova de vida e colete ao menos três amostras (por webcam) **na mesma
+  sessão** — se o rosto sair do quadro, a coleta recomeça.
+- O botão **Verificar imagem** (arquivo importado) sempre resulta em
+  `NEGADO` (`imagem_estatica_sem_prova_de_vida`).
 
 Ao fechar a janela, a câmera e o banco de dados são liberados
 automaticamente.
+
+## Prova de vida (desktop)
+
+O acesso só é concedido pela **webcam**, depois de um **desafio ativo e
+aleatório** (`liveness.py`, MediaPipe Face Mesh): **piscar** + dois entre
+**virar o rosto para a sua esquerda**, **para a sua direita** e **abrir a
+boca**, voltando a olhar de frente após cada movimento. As instruções aparecem
+no vídeo. A aprovação vale 20 s e somente enquanto o **mesmo rosto** continuar
+no quadro (sumiu, apareceu outro rosto ou houve troca brusca → recomeça).
+
+- Uma **imagem de arquivo** (comando `verificar` ou botão "Verificar imagem")
+  é **sempre negada** com o motivo `imagem_estatica_sem_prova_de_vida`.
+- Uma foto mostrada à webcam (impressa ou no celular) não pisca, não abre a
+  boca e não gira com paralaxe 3D, portanto nunca é aprovada.
+- Se o `mediapipe` não estiver instalado, a prova de vida fica indisponível e
+  **nenhum acesso é liberado** (falha fechada).
 
 ## 7. Linha de comando (CLI)
 
@@ -104,19 +122,19 @@ python3 cofre.py cadastrar --id ana --nome "Ana Souza" --nivel 2 \
     imagens/ana_1.jpg imagens/ana_2.jpg imagens/ana_3.jpg
 ```
 
-São necessárias pelo menos três imagens distintas da mesma pessoa.
+São necessárias pelo menos três imagens distintas da mesma pessoa. (O
+cadastro por arquivo continua disponível para o operador confiável; o
+**acesso**, não.)
 
-### Verificar uma imagem
+### Verificar uma imagem (sempre negado)
 
 ```bash
 python3 cofre.py verificar imagens/visitante.jpg --area toxinas
 ```
 
-Imprime a decisão em JSON e retorna um código de saída:
-
-- `0` — acesso permitido (simulado);
-- `1` — acesso negado;
-- `2` — erro operacional ou de argumentos.
+Uma imagem estática não prova que a pessoa está viva e presente: a tentativa
+é registrada e **sempre negada** (`imagem_estatica_sem_prova_de_vida`,
+código de saída `1`). Use o comando `webcam`.
 
 ### Verificar continuamente pela webcam
 
@@ -124,7 +142,8 @@ Imprime a decisão em JSON e retorna um código de saída:
 python3 cofre.py webcam --area geral --camera 0
 ```
 
-Mostra o vídeo e imprime decisões em JSON no terminal. Pressione **Q** ou
+Mostra o vídeo com as instruções do desafio de prova de vida e, somente
+após a aprovação, imprime as decisões em JSON no terminal. Pressione **Q** ou
 **Esc** para encerrar. Uma interrupção pelo teclado (Ctrl+C) também encerra
 o comando — sem qualquer liberação física.
 
@@ -164,13 +183,15 @@ isso é responsabilidade de quem organiza o manifesto.
 | `desconhecido` | Nenhuma identidade cadastrada está próxima o suficiente. |
 | `identidade_ambigua` | Duas identidades ficaram próximas demais entre si. |
 | `sem_autorizacao_nivel` | A pessoa foi identificada, mas seu nível/divisão não dá acesso à área escolhida. |
+| `imagem_estatica_sem_prova_de_vida` | Tentativa por arquivo de imagem: não há como provar que a pessoa está viva e presente. |
 
 ## 9. Limitações importantes
 
 - Este é um protótipo acadêmico local; não há garantias de segurança para
   uso em produção.
-- Não há prova de vida: o sistema não distingue uma pessoa real de uma foto
-  de boa qualidade.
+- A prova de vida ativa bloqueia fotos e imagens paradas, mas **não** cobre
+  ataques avançados (vídeo/deepfake em tempo real controlado por um
+  atacante, máscaras 3D).
 - O limiar (0.8) e a margem (0.1) padrão não foram calibrados para nenhum
   cenário real específico.
 - O cadastro pressupõe um operador confiável fisicamente presente; não há

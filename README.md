@@ -30,6 +30,7 @@ O projeto roda inteiramente no navegador como uma **Single Page Application (SPA
 ## ✨ Funcionalidades
 
 - **Reconhecimento facial via webcam** — captura de embeddings faciais diretamente no navegador
+- **Prova de vida ativa** — desafio aleatório (piscar, virar o rosto, abrir a boca); fotos e imagens paradas são bloqueadas
 - **Cadastro de usuários** com coleta de múltiplas amostras faciais
 - **3 níveis de acesso** hierárquicos (Básico, Diretor, Ministro)
 - **4 áreas protegidas** com regras de autorização distintas
@@ -48,6 +49,7 @@ O projeto roda inteiramente no navegador como uma **Single Page Application (SPA
 |---|---|
 | **React 18** (UMD + Babel Standalone) | Interface reativa em arquivo único |
 | **WebRTC** (`getUserMedia`) | Captura de vídeo da webcam |
+| **MediaPipe Face Landmarker** | Rastreamento facial (478 pontos + blendshapes) para a prova de vida e o recorte do rosto |
 | **Canvas API** | Extração de embeddings faciais avançados (HOG + LBP + cor, 128D) |
 | **Web Crypto API** | Criptografia AES-256-GCM dos embeddings armazenados |
 | **IndexedDB** | Persistência local dos cadastros, galeria e histórico |
@@ -128,8 +130,8 @@ O sistema implementa 3 níveis de acesso e 2 divisões:
 │                    │                         │
 │  ┌─────────────────▼──────────────────────┐ │
 │  │       Detecção de vivacidade            │ │
-│  │  • Motion: Δ pixels entre frames        │ │
-│  │  • Texture: variância de gradientes     │ │
+│  │  • MediaPipe Face Landmarker (478 pts)  │ │
+│  │  • Desafio aleatório: piscar/virar/boca │ │
 │  └─────────────────┬──────────────────────┘ │
 │                    │                         │
 │  ┌─────────────────▼──────────────────────┐ │
@@ -141,14 +143,28 @@ O sistema implementa 3 níveis de acesso e 2 divisões:
 
 ### Fluxo de verificação
 
-1. A webcam captura um frame a cada 2,5 segundos (+ liveness a cada 800ms)
-2. O frame é redimensionado para 64×64 px via Canvas
-3. Detecção de vivacidade: motion score (Δ pixels) + texture score (variância de gradientes)
-4. Se liveness < threshold → acesso negado (possível spoofing)
-5. Embedding avançado 128D extraído: HOG (64) + LBP (32) + cor (16) + stats (16)
-6. O vetor é normalizado (L2) e comparado com a galeria cadastrada (cifrada com AES-256)
-7. A menor distância Euclidiana determina a identidade
-8. As regras de autorização verificam se o usuário tem acesso à área selecionada
+1. A webcam é rastreada ~12×/s pelo **MediaPipe Face Landmarker** (478 pontos + blendshapes)
+2. **Prova de vida ativa**: um desafio de 3 etapas é sorteado — sempre **piscar** + 2 entre **virar à esquerda**, **virar à direita** e **abrir a boca** (com retorno à posição frontal entre etapas, 8 s por etapa)
+3. O giro é medido pela projeção da ponta do nariz no eixo entre os cantos dos olhos (paralaxe 3D) — inclinar, girar ou balançar uma **foto** não altera essa medida
+4. A aprovação vale 20 s **enquanto o mesmo rosto continuar no quadro**; rosto perdido, 2 rostos ou troca brusca reiniciam o desafio
+5. Sem prova de vida aprovada → acesso negado (`prova_de_vida_pendente`). Sem o MediaPipe → tudo negado (falha fechada)
+6. Somente o **recorte do rosto** é redimensionado para 64×64 px e vira um embedding 128D: HOG (64) + LBP (32) + cor (16) + stats (16)
+7. O vetor é normalizado (L2) e comparado com a galeria cadastrada (cifrada com AES-256)
+8. A menor distância Euclidiana determina a identidade
+9. As regras de autorização verificam se o usuário tem acesso à área selecionada
+
+O cadastro também exige prova de vida, e todas as amostras precisam vir da mesma sessão.
+Na versão desktop (`projeto/`), a mesma lógica está em `liveness.py` (MediaPipe Face Mesh); verificação por arquivo de imagem é sempre negada.
+
+### Testes da prova de vida
+
+```bash
+node --test tests/liveness-engine.test.js          # versão web
+cd projeto && python -m unittest test_liveness     # versão desktop
+```
+
+> **Limitação:** a prova de vida bloqueia fotos impressas, fotos na tela do celular e imagens paradas, mas não cobre ataques avançados (vídeo/deepfake em tempo real controlado por um atacante, máscaras 3D).
+
 ---
 
 ## 📁 Estrutura de Arquivos
@@ -157,15 +173,18 @@ O sistema implementa 3 níveis de acesso e 2 divisões:
 ├── cofre-academico.html        # Front-end SPA (React 18, abre direto no navegador)
 ├── README.md                   # Este arquivo
 ├── MODO_DE_USO.md              # Guia de uso da versão web
+├── tests/liveness-engine.test.js  # Testes da prova de vida (web)
 └── projeto/                    # Backend Python + GUI desktop
     ├── core.py                 # Motor de reconhecimento (embeddings, matching, autorização)
     ├── vision.py               # Pipeline de visão computacional (FaceNet, MTCNN)
+    ├── liveness.py             # Prova de vida ativa (MediaPipe Face Mesh)
     ├── cofre.py                # CLI — ponto de entrada do backend
     ├── gui.py                  # Interface gráfica desktop (Tkinter)
     ├── evaluation.py           # Avaliação de desempenho do modelo
     ├── demo_sintetico.py       # Demonstração com dados sintéticos
     ├── test_core.py            # Testes unitários do core
     ├── test_vision.py          # Testes unitários da visão
+    ├── test_liveness.py        # Testes da prova de vida
     ├── requirements.txt        # Dependências Python
     ├── MODO_DE_USO.md          # Guia de uso da versão desktop
     ├── .gitignore

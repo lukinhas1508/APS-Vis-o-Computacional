@@ -42,6 +42,12 @@ RAZAO_IMAGEM_DESFOCADA = "imagem_desfocada"
 RAZAO_ILUMINACAO_INADEQUADA = "iluminacao_inadequada"
 RAZAO_CAMERA_INDISPONIVEL = "camera_indisponivel"
 
+# Prova de vida (liveness.py). Uma imagem estática (arquivo) nunca prova que a
+# pessoa está viva e presente, portanto é sempre negada para ACESSO.
+RAZAO_PROVA_DE_VIDA_PENDENTE = "prova_de_vida_pendente"
+RAZAO_PROVA_DE_VIDA_INDISPONIVEL = "prova_de_vida_indisponivel"
+RAZAO_IMAGEM_ESTATICA = "imagem_estatica_sem_prova_de_vida"
+
 FONTES_VALIDAS = ("webcam", "imagem", "simulacao", "avaliacao")
 
 # Dimensões conhecidas por identificador de modelo (para validar embeddings).
