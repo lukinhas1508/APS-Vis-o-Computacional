@@ -11,6 +11,248 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.9/babel.min.js"></script>
+
+<!-- ================================================================
+     MediaPipe Face Landmarker (478 pontos + blendshapes).
+     Usado SOMENTE para a prova de vida e para recortar o rosto.
+     Se não carregar, o sistema falha fechado (nega todos os acessos).
+     ================================================================ -->
+<script type="module">
+  const MP_VERSION = "0.10.14";
+  const MP_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`;
+  const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+  window.__faceLandmarkerPromise = (async () => {
+    const { FaceLandmarker, FilesetResolver } = await import(`${MP_BASE}/vision_bundle.mjs`);
+    const fileset = await FilesetResolver.forVisionTasks(`${MP_BASE}/wasm`);
+    const options = (delegate) => ({
+      baseOptions: { modelAssetPath: MODEL_URL, delegate },
+      runningMode: "VIDEO",
+      numFaces: 2,                       /* 2 para detectar (e negar) múltiplos rostos */
+      outputFaceBlendshapes: true,
+      minFaceDetectionConfidence: 0.6,
+      minFacePresenceConfidence: 0.6,
+      minTrackingConfidence: 0.6,
+    });
+    try { return await FaceLandmarker.createFromOptions(fileset, options("GPU")); }
+    catch { return await FaceLandmarker.createFromOptions(fileset, options("CPU")); }
+  })();
+  window.__faceLandmarkerPromise.catch(err => console.error("[Cofre] Falha ao carregar o MediaPipe:", err));
+</script>
+
+<!-- ================================================================
+     Motor de prova de vida — lógica pura (sem DOM), testável em Node.
+     Desafio-resposta ATIVO e ALEATÓRIO: uma foto (impressa ou na tela
+     do celular) não consegue piscar, abrir a boca nem girar a cabeça
+     com paralaxe 3D. Inclinar/balançar a foto não engana, porque a
+     métrica de giro é a posição do nariz relativa aos cantos dos olhos,
+     que não muda quando um plano 2D é movido.
+     ================================================================ -->
+<script id="liveness-engine">
+(function (global) {
+  "use strict";
+
+  var CONFIG = {
+    FRONTAL_MAX: 0.07,      /* |giro - 0.5| abaixo disso = rosto de frente         */
+    TURN_MIN: 0.12,         /* |giro - 0.5| acima disso  = cabeça girada            */
+    BLINK_CLOSED: 0.45,     /* blendshape eyeBlink: olhos fechados                  */
+    BLINK_OPEN: 0.25,       /* blendshape eyeBlink: olhos abertos                   */
+    MOUTH_OPEN: 0.40,       /* blendshape jawOpen: boca aberta                      */
+    MOUTH_CLOSED: 0.15,     /* blendshape jawOpen: boca fechada                     */
+    MIN_FACE_SIZE: 0.18,    /* largura mínima do rosto (fração do quadro)           */
+    STEP_TIMEOUT_MS: 8000,  /* tempo máximo por etapa do desafio                    */
+    SESSION_TTL_MS: 20000,  /* validade da prova de vida aprovada                   */
+    MAX_GAP_MS: 700,        /* rosto sumiu por mais tempo que isso → recomeça       */
+    MAX_JUMP: 0.18,         /* salto do centro do rosto entre quadros → recomeça    */
+    RETRY_DELAY_MS: 2000,   /* espera após reprovação antes de novo desafio         */
+    STEPS: 3,
+  };
+
+  var CHALLENGES = {
+    blink: "Pisque os olhos",
+    left:  "Vire o rosto para a sua esquerda",
+    right: "Vire o rosto para a sua direita",
+    mouth: "Abra a boca",
+  };
+
+  var nextId = 1;
+
+  function shuffle(arr, rand) {
+    var a = arr.slice();
+    for (var i = a.length - 1; i > 0; i--) {
+      var j = Math.floor(rand() * (i + 1));
+      var t = a[i]; a[i] = a[j]; a[j] = t;
+    }
+    return a;
+  }
+
+  /* Sempre inclui "piscar" + 2 desafios sorteados, em ordem aleatória. */
+  function newSequence(rand) {
+    rand = rand || Math.random;
+    var others = shuffle(["left", "right", "mouth"], rand).slice(0, CONFIG.STEPS - 1);
+    return shuffle(["blink"].concat(others), rand);
+  }
+
+  function initialState(now, rand, reason) {
+    return {
+      id: nextId++,
+      status: "aguardando_rosto",   /* aguardando_rosto | desafio | aprovado | reprovado */
+      seq: newSequence(rand),
+      idx: 0,
+      phase: "neutral",             /* neutral → action → return                         */
+      stepStart: now,
+      lastSeen: null,
+      lastCenter: null,
+      passedAt: null,
+      failedAt: null,
+      reason: reason || null,
+      hint: null,
+    };
+  }
+
+  function isNeutral(m) {
+    return Math.abs(m.yaw - 0.5) < CONFIG.FRONTAL_MAX &&
+           m.blink < CONFIG.BLINK_OPEN && m.mouth < CONFIG.MOUTH_CLOSED;
+  }
+
+  /* Convenção: giro > 0.5 = pessoa virou para a ESQUERDA DELA
+     (no quadro bruto, não espelhado, o nariz vai para a direita). */
+  function didAction(ch, m) {
+    switch (ch) {
+      case "blink": return m.blink > CONFIG.BLINK_CLOSED;
+      case "left":  return (m.yaw - 0.5) > CONFIG.TURN_MIN;
+      case "right": return (0.5 - m.yaw) > CONFIG.TURN_MIN;
+      case "mouth": return m.mouth > CONFIG.MOUTH_OPEN;
+    }
+    return false;
+  }
+
+  function opposite(ch) { return ch === "left" ? "right" : ch === "right" ? "left" : null; }
+
+  function copy(s, patch) { var o = {}, k; for (k in s) o[k] = s[k]; for (k in patch) o[k] = patch[k]; return o; }
+
+  /* m = { faces, yaw, blink, mouth, center:{x,y}, size } — valores normalizados 0..1.
+     Retorna um NOVO estado (não muta o anterior). */
+  function step(s, m, now, rand) {
+    rand = rand || Math.random;
+
+    /* Reprovado: espera um pouco e gera desafio novo (sequência nova). */
+    if (s.status === "reprovado") {
+      if (now - s.failedAt >= CONFIG.RETRY_DELAY_MS) return initialState(now, rand, s.reason);
+      return s;
+    }
+
+    /* Nenhum rosto: tolera falhas curtas; ausência longa invalida tudo. */
+    if (!m || m.faces === 0) {
+      if (s.lastSeen !== null && now - s.lastSeen > CONFIG.MAX_GAP_MS) {
+        return initialState(now, rand, "rosto_perdido");
+      }
+      return s.lastSeen === null ? copy(s, { hint: "Posicione o rosto na câmera" }) : s;
+    }
+
+    /* Mais de um rosto: possível foto ao lado de uma pessoa → recomeça. */
+    if (m.faces > 1) return initialState(now, rand, "multiplos_rostos");
+
+    /* Salto brusco do rosto (troca de rosto/foto) → recomeça. */
+    if (s.lastCenter && s.lastSeen !== null) {
+      var dx = m.center.x - s.lastCenter.x, dy = m.center.y - s.lastCenter.y;
+      if (Math.sqrt(dx * dx + dy * dy) > CONFIG.MAX_JUMP) return initialState(now, rand, "rosto_trocado");
+    }
+    if (s.lastSeen !== null && now - s.lastSeen > CONFIG.MAX_GAP_MS) {
+      return initialState(now, rand, "rosto_perdido");
+    }
+
+    var base = { lastSeen: now, lastCenter: m.center, hint: null };
+
+    if (m.size < CONFIG.MIN_FACE_SIZE) {
+      return copy(s, { lastSeen: now, lastCenter: m.center, hint: "Aproxime o rosto da câmera",
+                       stepStart: s.status === "desafio" ? s.stepStart : now });
+    }
+
+    if (s.status === "aprovado") {
+      if (now - s.passedAt > CONFIG.SESSION_TTL_MS) {
+        var fresh = initialState(now, rand, "prova_de_vida_expirada");
+        return copy(fresh, { status: "desafio", lastSeen: now, lastCenter: m.center });
+      }
+      return copy(s, base);
+    }
+
+    if (s.status === "aguardando_rosto") {
+      s = copy(s, { status: "desafio", stepStart: now, phase: "neutral" });
+    }
+
+    /* status === "desafio" */
+    if (now - s.stepStart > CONFIG.STEP_TIMEOUT_MS) {
+      return copy(copy(s, base), { status: "reprovado", failedAt: now, reason: "tempo_esgotado" });
+    }
+
+    var ch = s.seq[s.idx];
+    var opp = opposite(ch);
+    if (opp && s.phase !== "return" && didAction(opp, m)) {
+      return copy(copy(s, base), { status: "reprovado", failedAt: now, reason: "desafio_incorreto" });
+    }
+
+    var patch = base;
+    if (s.phase === "neutral") {
+      if (isNeutral(m)) patch = copy(base, { phase: "action" });
+      else patch = copy(base, { hint: "Olhe de frente, olhos abertos e boca fechada" });
+    } else if (s.phase === "action") {
+      if (didAction(ch, m)) patch = copy(base, { phase: "return" });
+    } else if (s.phase === "return") {
+      if (isNeutral(m)) {
+        var idx = s.idx + 1;
+        if (idx >= s.seq.length) {
+          patch = copy(base, { idx: idx, status: "aprovado", passedAt: now, reason: null });
+        } else {
+          patch = copy(base, { idx: idx, phase: "action", stepStart: now });
+        }
+      } else {
+        patch = copy(base, { hint: "Volte a olhar de frente" });
+      }
+    }
+    return copy(s, patch);
+  }
+
+  /* Extrai métricas de um resultado do MediaPipe FaceLandmarker. */
+  /* aspect = largura / altura do vídeo (corrige a escala de x). */
+  function metricsFromResult(res, aspect) {
+    aspect = aspect || 1;
+    var faces = (res && res.faceLandmarks) ? res.faceLandmarks.length : 0;
+    if (faces !== 1) return { faces: faces };
+    var lm = res.faceLandmarks[0];
+    var minX = 1, minY = 1, maxX = 0, maxY = 0;
+    for (var i = 0; i < lm.length; i++) {
+      if (lm[i].x < minX) minX = lm[i].x; if (lm[i].x > maxX) maxX = lm[i].x;
+      if (lm[i].y < minY) minY = lm[i].y; if (lm[i].y > maxY) maxY = lm[i].y;
+    }
+    /* 33 = canto externo do olho direito da pessoa; 263 = do olho esquerdo; 1 = ponta do nariz */
+    /* Giro = projeção da ponta do nariz no eixo entre os cantos dos olhos
+       (0 = olho direito, 1 = olho esquerdo). Projetar no eixo dos olhos
+       torna a métrica imune a girar o celular no plano (roll). */
+    var eyeR = lm[33], eyeL = lm[263], nose = lm[1];
+    var ex = (eyeL.x - eyeR.x) * aspect, ey = eyeL.y - eyeR.y;
+    var d2 = ex * ex + ey * ey;
+    var yaw = d2 < 1e-12 ? 0.5 : (((nose.x - eyeR.x) * aspect) * ex + (nose.y - eyeR.y) * ey) / d2;
+    var bs = {};
+    var cats = (res.faceBlendshapes && res.faceBlendshapes[0]) ? res.faceBlendshapes[0].categories : [];
+    for (var j = 0; j < cats.length; j++) bs[cats[j].categoryName] = cats[j].score;
+    var blink = ((bs.eyeBlinkLeft || 0) + (bs.eyeBlinkRight || 0)) / 2;
+    return {
+      faces: 1,
+      yaw: yaw,
+      blink: blink,
+      mouth: bs.jawOpen || 0,
+      center: { x: (minX + maxX) / 2, y: (minY + maxY) / 2 },
+      size: maxX - minX,
+      box: { x: minX, y: minY, w: maxX - minX, h: maxY - minY },
+    };
+  }
+
+  var api = { CONFIG: CONFIG, CHALLENGES: CHALLENGES, initialState: initialState, step: step,
+              newSequence: newSequence, metricsFromResult: metricsFromResult, isNeutral: isNeutral, didAction: didAction };
+  global.LivenessEngine = api;
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+})(typeof window !== "undefined" ? window : globalThis);
+</script>
 <style>
 /* ===== Tokens ===== */
 :root {
@@ -223,6 +465,26 @@ input, select, textarea { caret-color: var(--accent); }
 .liveness-badge[data-level="medium"] { background: rgba(229,169,62,0.85); color: #fff; }
 .liveness-badge[data-level="low"] { background: rgba(229,90,90,0.85); color: #fff; }
 .liveness-badge[data-level="none"] { background: rgba(107,108,114,0.7); color: #fff; }
+
+/* ===== Desafio de prova de vida ===== */
+.challenge {
+  position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+  max-width: calc(100% - 24px);
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 8px 14px; border-radius: var(--radius);
+  background: rgba(17,18,20,0.78); color: #fff;
+  backdrop-filter: blur(6px); text-align: center;
+}
+.challenge-text { font: 600 14px/1.3 var(--sans, inherit); }
+.challenge-hint { font: 400 11px/1.3 var(--mono); opacity: 0.75; }
+.challenge-steps { display: flex; gap: 6px; }
+.challenge-steps span {
+  width: 22px; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.25);
+}
+.challenge-steps span[data-state="done"] { background: var(--success); }
+.challenge-steps span[data-state="current"] { background: var(--warning); }
+.challenge[data-status="aprovado"] { background: rgba(62,201,126,0.85); }
+.challenge[data-status="reprovado"] { background: rgba(229,90,90,0.88); }
 
 /* ===== Area selector ===== */
 .areas {
@@ -591,39 +853,29 @@ function extractEmbedding(imgData, w, h) {
 }
 
 /* ================================================================ */
-/* Liveness detection — motion + texture anti-spoofing              */
+/* Prova de vida — motor definido no bloco "liveness-engine"         */
 /* ================================================================ */
-function computeLiveness(prevGray, currGray, w, h) {
-  if (!prevGray) return { motion: 0, texture: 0, score: 0, level: "none" };
+const LE = window.LivenessEngine;
 
-  /* Motion: average absolute pixel difference between frames */
-  let motionSum = 0;
-  for (let i = 0; i < w * h; i++) motionSum += Math.abs(currGray[i] - prevGray[i]);
-  const motion = Math.min(motionSum / (w * h) * 20, 1);
+const LIVE_REASON_TEXT = {
+  rosto_perdido: "Rosto saiu do quadro — desafio reiniciado",
+  multiplos_rostos: "Mais de um rosto no quadro — desafio reiniciado",
+  rosto_trocado: "Mudança brusca de rosto — desafio reiniciado",
+  tempo_esgotado: "Tempo esgotado — novo desafio em instantes",
+  desafio_incorreto: "Movimento incorreto — novo desafio em instantes",
+  prova_de_vida_expirada: "Prova de vida expirada — refaça o desafio",
+};
 
-  /* Texture: variance of gradient magnitudes per block (real faces have complex 3D texture) */
-  let texScore = 0;
-  const B = 4, bs = w / B;
-  for (let by = 0; by < B; by++) {
-    for (let bx = 0; bx < B; bx++) {
-      let s = 0, sq = 0, n = 0;
-      for (let y = by * bs + 1; y < (by + 1) * bs - 1; y++) {
-        for (let x = bx * bs + 1; x < (bx + 1) * bs - 1; x++) {
-          const gx = currGray[y * w + x + 1] - currGray[y * w + x - 1];
-          const gy = currGray[(y + 1) * w + x] - currGray[(y - 1) * w + x];
-          const mag = Math.sqrt(gx * gx + gy * gy);
-          s += mag; sq += mag * mag; n++;
-        }
-      }
-      const mean = s / n;
-      texScore += sq / n - mean * mean;
-    }
-  }
-  const texture = Math.min(texScore / (B * B) * 120, 1);
-
-  const score = motion * 0.55 + texture * 0.45;
-  const level = score > 0.45 ? "high" : score > 0.18 ? "medium" : score > 0.04 ? "low" : "none";
-  return { motion, texture, score, level };
+function livenessView(s, mpStatus) {
+  if (mpStatus === "carregando") return { level: "none", badge: "Carregando", text: "Carregando detector facial...", hint: null };
+  if (mpStatus === "erro") return { level: "low", badge: "Indisponível", text: "Detector facial indisponível — acesso bloqueado", hint: "Verifique a conexão com a internet e recarregue" };
+  if (!s) return { level: "none", badge: "Sem dados", text: "", hint: null };
+  if (s.status === "aprovado") return { level: "high", badge: "Vivo", text: "Prova de vida aprovada", hint: s.hint };
+  if (s.status === "reprovado") return { level: "low", badge: "Reprovado", text: LIVE_REASON_TEXT[s.reason] || "Prova de vida reprovada", hint: null };
+  if (s.status === "aguardando_rosto") return { level: "none", badge: "Sem rosto", text: s.hint || "Posicione o rosto na câmera", hint: s.reason ? LIVE_REASON_TEXT[s.reason] : null };
+  const ch = s.seq[Math.min(s.idx, s.seq.length - 1)];
+  const text = s.phase === "neutral" ? "Olhe de frente para a câmera" : LE.CHALLENGES[ch];
+  return { level: "medium", badge: `Desafio ${Math.min(s.idx + 1, s.seq.length)}/${s.seq.length}`, text, hint: s.hint };
 }
 
 function identify(query, gallery, users, threshold = 0.8, margin = 0.1) {
@@ -648,7 +900,7 @@ function identify(query, gallery, users, threshold = 0.8, margin = 0.1) {
 /* ================================================================ */
 
 const DB_NAME = "cofre_academico";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -665,6 +917,10 @@ function openDB() {
         if (!db.objectStoreNames.contains("crypto")) db.createObjectStore("crypto", { keyPath: "id" });
         /* Limpar galeria: formato de embedding mudou (HOG/LBP vs pixel bruto) */
         if (old >= 1) { req.transaction.objectStore("gallery").clear(); req.transaction.objectStore("users").clear(); }
+      }
+      if (old >= 2 && old < 3) {
+        /* v3: embedding passa a ser extraído só do recorte do rosto (MediaPipe) — recadastro necessário */
+        req.transaction.objectStore("gallery").clear(); req.transaction.objectStore("users").clear();
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -776,7 +1032,7 @@ async function decryptVectors(encrypted, key) {
 }
 
 function exportData(users, gallery, attempts) {
-  const data = { version: 1, exportedAt: new Date().toISOString(), users, gallery, attempts };
+  const data = { version: 2, exportedAt: new Date().toISOString(), users, gallery, attempts };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -791,6 +1047,7 @@ function importData(file) {
       try {
         const data = JSON.parse(reader.result);
         if (!data.users || !data.gallery) throw new Error("Formato inválido");
+        if (!(data.version >= 2)) throw new Error("Backup de versão antiga (embedding incompatível) — recadastre os usuários");
         resolve(data);
       } catch (e) { reject(e); }
     };
@@ -825,13 +1082,31 @@ function App() {
   const [area, setArea] = useState("geral");
   const [cameraActive, setCameraActive] = useState(false);
   const [decision, setDecision] = useState(null);
-  const [liveness, setLiveness] = useState({ motion: 0, texture: 0, score: 0, level: "none" });
+  const [live, setLive] = useState(null);            /* estado do motor de prova de vida */
+  const [mpStatus, setMpStatus] = useState("carregando");
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const canvasRef = useRef(null);
   const importRef = useRef(null);
-  const prevGrayRef = useRef(null);
+  const landmarkerRef = useRef(null);
+  const liveRef = useRef(null);
+  const faceRef = useRef(null);                       /* últimas métricas do rosto rastreado */
+  const samplesSessionRef = useRef(null);             /* sessão de vida em que as amostras foram coletadas */
+
+  /* Carrega o MediaPipe (definido em <script type="module"> no <head>) */
+  useEffect(() => {
+    let cancelled = false, tries = 0;
+    const wait = () => {
+      if (cancelled) return;
+      const p = window.__faceLandmarkerPromise;
+      if (!p) { if (++tries > 100) { setMpStatus("erro"); return; } setTimeout(wait, 100); return; }
+      p.then(lm => { if (!cancelled) { landmarkerRef.current = lm; setMpStatus("pronto"); } })
+       .catch(() => { if (!cancelled) setMpStatus("erro"); });
+    };
+    wait();
+    return () => { cancelled = true; };
+  }, []);
 
   /* IndexedDB — load on mount */
   useEffect(() => {
@@ -909,19 +1184,35 @@ function App() {
   useEffect(() => () => stopCamera(), [stopCamera]);
   useEffect(() => { startCamera(); }, []);
 
-  /* Liveness tracking — update every 800ms for real-time feedback */
+  /* Prova de vida — rastreia o rosto ~12x por segundo e avança o desafio */
   useEffect(() => {
-    if (!cameraActive) { prevGrayRef.current = null; setLiveness({ motion: 0, texture: 0, score: 0, level: "none" }); return; }
-    const iv = setInterval(() => {
-      const frame = captureFrame();
-      if (!frame) return;
-      const gray = toGray(frame.data, EMB_SIZE, EMB_SIZE);
-      const live = computeLiveness(prevGrayRef.current, gray, EMB_SIZE, EMB_SIZE);
-      prevGrayRef.current = gray;
-      setLiveness(live);
-    }, 800);
-    return () => clearInterval(iv);
-  }, [cameraActive, captureFrame]);
+    const reset = () => { liveRef.current = null; faceRef.current = null; setLive(null); };
+    if (!cameraActive || mpStatus !== "pronto") { reset(); return; }
+    liveRef.current = LE.initialState(Date.now());
+    setLive(liveRef.current);
+    let raf = 0, lastRun = 0, lastTs = -1, stopped = false;
+    const keyOf = s => `${s.id}|${s.status}|${s.idx}|${s.phase}|${s.hint}|${s.reason}`;
+    const loop = (t) => {
+      if (stopped) return;
+      raf = requestAnimationFrame(loop);
+      if (t - lastRun < 80) return;
+      lastRun = t;
+      const v = videoRef.current, lm = landmarkerRef.current;
+      if (!v || !lm || v.readyState < 2 || !v.videoWidth) return;
+      const ts = performance.now();
+      if (ts <= lastTs) return;
+      lastTs = ts;
+      let m;
+      try { m = LE.metricsFromResult(lm.detectForVideo(v, ts), v.videoWidth / v.videoHeight); } catch { return; }
+      faceRef.current = m.faces === 1 ? m : null;
+      const prev = liveRef.current;
+      const next = LE.step(prev, m, Date.now());
+      liveRef.current = next;
+      if (keyOf(next) !== keyOf(prev)) setLive(next);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => { stopped = true; cancelAnimationFrame(raf); };
+  }, [cameraActive, mpStatus]);
   useEffect(() => {
     if (cameraActive && videoRef.current && streamRef.current) {
       videoRef.current.srcObject = streamRef.current;
@@ -929,35 +1220,47 @@ function App() {
     }
   }, [cameraActive]);
 
-  /* Frame capture + advanced embedding + liveness */
-  const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current) return null;
-    const c = canvasRef.current, ctx = c.getContext("2d", { willReadFrequently: true });
+  /* Captura SOMENTE o rosto rastreado (recorte quadrado com margem) em 64×64 */
+  const captureFace = useCallback(() => {
+    const v = videoRef.current, c = canvasRef.current, m = faceRef.current;
+    if (!v || !c || !m || !v.videoWidth) return null;
+    const W = v.videoWidth, H = v.videoHeight;
+    const cx = (m.box.x + m.box.w / 2) * W, cy = (m.box.y + m.box.h / 2) * H;
+    const side = Math.max(m.box.w * W, m.box.h * H) * 1.15;
+    const sx = Math.max(0, cx - side / 2), sy = Math.max(0, cy - side / 2);
+    const sw = Math.min(side, W - sx), sh = Math.min(side, H - sy);
+    const ctx = c.getContext("2d", { willReadFrequently: true });
     c.width = EMB_SIZE; c.height = EMB_SIZE;
-    ctx.drawImage(videoRef.current, 0, 0, EMB_SIZE, EMB_SIZE);
+    ctx.drawImage(v, sx, sy, sw, sh, 0, 0, EMB_SIZE, EMB_SIZE);
     return ctx.getImageData(0, 0, EMB_SIZE, EMB_SIZE);
   }, []);
 
   const captureEmbedding = useCallback(() => {
-    const frame = captureFrame();
-    if (!frame) return null;
-    /* Update liveness */
-    const gray = toGray(frame.data, EMB_SIZE, EMB_SIZE);
-    const live = computeLiveness(prevGrayRef.current, gray, EMB_SIZE, EMB_SIZE);
-    prevGrayRef.current = gray;
-    setLiveness(live);
-    return extractEmbedding(frame.data, EMB_SIZE, EMB_SIZE);
-  }, [captureFrame]);
+    const frame = captureFace();
+    return frame ? extractEmbedding(frame.data, EMB_SIZE, EMB_SIZE) : null;
+  }, [captureFace]);
 
-  /* Verify */
-  const handleVerify = useCallback(() => {
-    const emb = captureEmbedding();
-    if (!emb) { toast("Inicie a câmera primeiro.", "error"); return; }
-    /* Liveness gate — block if motion/texture too low (possible photo/replay) */
-    if (liveness.level === "none" || liveness.level === "low") {
+  /* Motivo de bloqueio pela prova de vida, ou null se a pessoa está viva e presente */
+  const livenessBlock = useCallback(() => {
+    if (mpStatus !== "pronto") return "detector_facial_indisponivel";
+    const s = liveRef.current;
+    if (!s || s.status !== "aprovado") return "prova_de_vida_pendente";
+    if (Date.now() - s.passedAt > LE.CONFIG.SESSION_TTL_MS) return "prova_de_vida_expirada";
+    if (!faceRef.current || s.lastSeen === null || Date.now() - s.lastSeen > LE.CONFIG.MAX_GAP_MS) return "rosto_ausente";
+    return null;
+  }, [mpStatus]);
+
+  /* Verify — auto = chamado pelo temporizador (não registra negações enquanto o desafio está em andamento) */
+  const handleVerify = useCallback((opts) => {
+    const auto = opts && opts.auto === true;
+    if (!cameraActive) { if (!auto) toast("Inicie a câmera primeiro.", "error"); return; }
+    const block = livenessBlock();
+    const emb = block ? null : captureEmbedding();
+    if (block || !emb) {
+      if (auto) return;
       const dec = {
         userId: null, userName: "desconhecido", userLevel: null, area, granted: false,
-        reason: "prova_de_vida_falhou", distance: null,
+        reason: block || "nenhum_rosto", distance: null,
         timestamp: new Date().toLocaleTimeString("pt-BR"),
       };
       setDecision(dec);
@@ -971,36 +1274,43 @@ function App() {
     const dec = {
       userId: result.user?.id || null, userName: result.user?.name || "desconhecido",
       userLevel: result.user?.level || null, area, granted, reason,
-      distance: result.dist, liveness: liveness.level,
+      distance: result.dist, liveness: "aprovado",
       timestamp: new Date().toLocaleTimeString("pt-BR"),
     };
     setDecision(dec);
     setAttempts(a => [dec, ...a].slice(0, 50));
     setTimeout(() => setDecision(d => d === dec ? null : d), 4000);
-  }, [captureEmbedding, gallery, users, area, toast, liveness]);
+  }, [cameraActive, livenessBlock, captureEmbedding, gallery, users, area, toast]);
 
   useEffect(() => {
     if (!cameraActive || tab !== "verificar" || users.length === 0) return;
-    const iv = setInterval(handleVerify, 2500);
+    const iv = setInterval(() => handleVerify({ auto: true }), 2500);
     return () => clearInterval(iv);
   }, [cameraActive, tab, handleVerify, users.length]);
 
-  /* Collect sample — with variation check (anti-spoofing) */
+  /* Coleta de amostra — exige prova de vida aprovada; todas as amostras devem vir
+     da MESMA sessão de vida (mesmo rosto rastreado continuamente). */
   const collectSample = useCallback(() => {
+    if (!cameraActive) { toast("Inicie a câmera primeiro.", "error"); return; }
+    const block = livenessBlock();
+    if (block) { toast("Conclua a prova de vida (siga as instruções no vídeo) antes de coletar.", "error"); return; }
     const e = captureEmbedding();
-    if (!e) { toast("Inicie a câmera primeiro.", "error"); return; }
-    if (samples.length >= 10) { toast("Limite de 10 amostras.", "error"); return; }
-    /* Check that sample differs enough from previous ones (defeats static photo) */
-    if (samples.length > 0) {
-      const lastDist = euclideanDist(e, samples[samples.length - 1]);
-      if (lastDist < 0.05) {
-        toast("Amostra muito similar à anterior. Mova ligeiramente o rosto.", "error");
-        return;
-      }
+    if (!e) { toast("Nenhum rosto detectado.", "error"); return; }
+    const sessionId = liveRef.current.id;
+    let base = samples;
+    if (samples.length > 0 && samplesSessionRef.current !== sessionId) {
+      base = [];
+      toast("Nova sessão de prova de vida — amostras anteriores descartadas.", "error");
     }
-    setSamples(s => [...s, e]);
-    toast(`Amostra ${samples.length + 1} coletada · liveness: ${liveness.level}`);
-  }, [captureEmbedding, samples, toast, liveness]);
+    if (base.length >= 10) { toast("Limite de 10 amostras.", "error"); return; }
+    if (base.length > 0 && euclideanDist(e, base[base.length - 1]) < 0.05) {
+      toast("Amostra muito similar à anterior. Mova ligeiramente o rosto.", "error");
+      return;
+    }
+    samplesSessionRef.current = sessionId;
+    setSamples([...base, e]);
+    toast(`Amostra ${base.length + 1} coletada · pessoa viva confirmada`);
+  }, [cameraActive, livenessBlock, captureEmbedding, samples, toast]);
 
   /* Register */
   const handleRegister = useCallback(() => {
@@ -1027,6 +1337,7 @@ function App() {
   }, [toast]);
 
   /* Decision */
+  const lv = livenessView(live, mpStatus);
   const decResult = decision ? (decision.granted ? "granted" : "denied") : "idle";
   const decTitle = decision
     ? (decision.granted ? "Acesso permitido — somente simulação" : "Acesso negado")
@@ -1045,7 +1356,7 @@ function App() {
           </svg>
         </div>
         <h1 className="header-title">Cofre Acadêmico</h1>
-        <span className="header-tag" aria-label="Status: acadêmico">Acadêmico v2</span>
+        <span className="header-tag" aria-label="Status: acadêmico">Acadêmico v3</span>
         <div className="header-spacer"/>
         <nav className="nav" aria-label="Navegação principal">
           {[
@@ -1087,10 +1398,24 @@ function App() {
                 <>
                   <video ref={videoRef} autoPlay playsInline muted aria-label="Feed da câmera ao vivo"/>
                   <span className="live-dot" aria-label="Câmera ao vivo">Ao vivo</span>
-                  <span className="liveness-badge" data-level={liveness.level}
-                    aria-label={`Prova de vida: ${liveness.level}`}>
-                    <Icon name="eye" size={11}/> {liveness.level === "high" ? "Vivo" : liveness.level === "medium" ? "Provável" : liveness.level === "low" ? "Suspeito" : "Sem dados"}
+                  <span className="liveness-badge" data-level={lv.level}
+                    aria-label={`Prova de vida: ${lv.badge}`}>
+                    <Icon name="eye" size={11}/> {lv.badge}
                   </span>
+                  {(lv.text || lv.hint) && (
+                    <div className="challenge" data-status={mpStatus === "pronto" && live ? live.status : "erro"}
+                      role="status" aria-live="polite">
+                      {lv.text && <span className="challenge-text">{lv.text}</span>}
+                      {lv.hint && <span className="challenge-hint">{lv.hint}</span>}
+                      {live && mpStatus === "pronto" && (live.status === "desafio" || live.status === "aprovado") && (
+                        <span className="challenge-steps" aria-hidden="true">
+                          {live.seq.map((c, i) => (
+                            <span key={i} data-state={i < live.idx ? "done" : i === live.idx ? "current" : "todo"}/>
+                          ))}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </>
               ) : (
                 <figcaption className="video-empty">
@@ -1106,7 +1431,7 @@ function App() {
               ? <button className="btn btn-primary" onClick={startCamera}><Icon name="play"/> Iniciar câmera</button>
               : <button className="btn btn-stop" onClick={stopCamera}><Icon name="stop"/> Parar</button>
             }
-            <button className="btn btn-default" onClick={handleVerify} disabled={!cameraActive}>
+            <button className="btn btn-default" onClick={() => handleVerify()} disabled={!cameraActive}>
               <Icon name="scan"/> Verificar agora
             </button>
           </div>
@@ -1239,8 +1564,9 @@ function App() {
               <h2 style={{ fontSize: 14, marginTop: 4 }}>Coleta de amostras</h2>
 
               <button type="button" className="btn btn-primary" onClick={collectSample}
-                disabled={!cameraActive} style={{ width: "100%", justifyContent: "center" }}>
-                <Icon name="camera"/> Coletar frame da webcam
+                disabled={!cameraActive || !live || live.status !== "aprovado"}
+                style={{ width: "100%", justifyContent: "center" }}>
+                <Icon name="camera"/> {live && live.status === "aprovado" ? "Coletar frame da webcam" : "Conclua a prova de vida para coletar"}
               </button>
 
               <div className="progress-bar" role="progressbar"
@@ -1260,7 +1586,7 @@ function App() {
               </button>
 
               <div className="caution" role="alert">
-                O sistema inclui detecção de vivacidade (motion + texture) e criptografia AES-256 dos embeddings. O operador deve garantir que as amostras são da mesma pessoa. Mova o rosto levemente entre coletas.
+                A coleta só é liberada após a prova de vida (desafio aleatório: piscar, virar o rosto, abrir a boca). Fotos impressas ou na tela do celular são bloqueadas. Todas as amostras precisam ser da mesma sessão — se o rosto sair do quadro, a coleta recomeça.
               </div>
 
               <hr className="rule"/>

@@ -1,6 +1,10 @@
 """gui.py — Interface gráfica Tkinter do Cofre Acadêmico (protótipo).
 
-PROTÓTIPO ACADÊMICO: não há prova de vida, nenhuma fechadura física é
+PROTÓTIPO ACADÊMICO: o acesso exige prova de vida ATIVA (liveness.py —
+desafio aleatório de piscar / virar o rosto / abrir a boca, com o mesmo rosto
+rastreado continuamente). Imagens importadas de arquivo nunca liberam acesso,
+pois uma imagem estática não prova que a pessoa está viva e presente.
+Nenhuma fechadura física é
 acionada e não há login administrativo — o cadastro pressupõe um operador
 local confiável, presente fisicamente junto ao equipamento.
 
@@ -23,7 +27,8 @@ from typing import Optional
 import core
 
 AVISO_PROTOTIPO = (
-    "PROTÓTIPO ACADÊMICO — sem prova de vida. Reconhecimento facial simulado; "
+    "PROTÓTIPO ACADÊMICO — acesso somente com prova de vida pela webcam (fotos e arquivos são negados). "
+    "Reconhecimento facial simulado; "
     "nenhuma fechadura física é acionada e nenhum sistema governamental real é acessado."
 )
 
@@ -41,11 +46,13 @@ TEXTO_SEM_AUTORIZACAO = "SEM AUTORIZAÇÃO"
 class _Trabalho:
     """Unidade de trabalho enviada à thread de inferência."""
 
-    def __init__(self, tipo: str, imagem=None, geracao: int = 0, timestamp: float = 0.0):
-        self.tipo = tipo  # "webcam" ou "imagem"
+    def __init__(self, tipo: str, imagem=None, geracao: int = 0, timestamp: float = 0.0,
+                 sessao_id: Optional[int] = None):
+        self.tipo = tipo  # "webcam" (verificação) ou "cadastro" (amostra)
         self.imagem = imagem
         self.geracao = geracao
         self.timestamp = timestamp
+        self.sessao_id = sessao_id  # sessão de prova de vida em que o quadro foi capturado
 
 
 class _ThreadInferencia(threading.Thread):
@@ -91,6 +98,9 @@ class _ThreadInferencia(threading.Thread):
                     "tipo": trabalho.tipo,
                     "geracao": trabalho.geracao,
                     "timestamp": trabalho.timestamp,
+                    "sessao_id": trabalho.sessao_id,
+                    "imagem": trabalho.imagem if trabalho.tipo == "cadastro" else None,
+                    "pixels_hash": getattr(trabalho, "pixels_hash", None),
                     "embedding": embedding,
                     "falha": falha,
                 }
@@ -136,6 +146,12 @@ class CofreGUI:
         self._quadro_atual = None
         self._imagem_importada = None
 
+        # Prova de vida
+        self._tracker = None                 # liveness.FaceMeshTracker
+        self._sessao_vida = None             # liveness.LivenessSession
+        self._erro_vida: Optional[str] = None
+        self._sessao_amostras: Optional[int] = None
+
         self._construir_interface()
         self.root.protocol("WM_DELETE_WINDOW", self._ao_fechar)
         self._agendar_poll_resultados()
@@ -172,6 +188,11 @@ class CofreGUI:
         self.canvas_video = tk.Label(esquerda, bg="black", width=70, height=20)
         self.canvas_video.pack(fill="both", expand=True, pady=(0, 8))
 
+        self.label_vida = tk.Label(
+            esquerda, text="Prova de vida: câmera inativa", font=("TkDefaultFont", 12, "bold"), fg="#555555"
+        )
+        self.label_vida.pack(anchor="w", pady=(0, 6))
+
         self.label_decisao = tk.Label(
             esquerda, text="—", font=("TkDefaultFont", 16, "bold"), fg="#333333"
         )
@@ -183,7 +204,7 @@ class CofreGUI:
         botoes = tk.Frame(esquerda)
         botoes.pack(anchor="w", pady=(0, 8))
         tk.Button(botoes, text="Importar imagem", command=self._importar_imagem).pack(side="left", padx=2)
-        tk.Button(botoes, text="Verificar", command=self._verificar_imagem_importada).pack(side="left", padx=2)
+        tk.Button(botoes, text="Verificar imagem", command=self._verificar_imagem_importada).pack(side="left", padx=2)
         tk.Button(botoes, text="Iniciar câmera", command=self._iniciar_camera).pack(side="left", padx=2)
         tk.Button(botoes, text="Parar", command=self._parar_camera).pack(side="left", padx=2)
         tk.Button(botoes, text="Exportar CSV", command=self._exportar_csv).pack(side="left", padx=2)
@@ -251,8 +272,9 @@ class CofreGUI:
 
         tk.Label(
             direita,
-            text="O operador deve garantir que todas as amostras são da mesma pessoa. "
-                 "Diferenças entre as imagens NÃO constituem prova de vida.",
+            text="A coleta só é liberada após a prova de vida (siga as instruções no vídeo). "
+                 "Todas as amostras precisam ser da mesma sessão: se o rosto sair do quadro, "
+                 "a coleta recomeça.",
             wraplength=320, fg="#7a1f1f", justify="left",
         ).pack(anchor="w", pady=(8, 0))
 
@@ -301,9 +323,19 @@ class CofreGUI:
         if self._imagem_importada is None:
             messagebox.showinfo("Verificar", "Importe uma imagem primeiro.")
             return
-        geracao = self._geracao_atual
-        trabalho = _Trabalho(tipo="imagem", imagem=self._imagem_importada, geracao=geracao, timestamp=time.monotonic())
-        self._fila_trabalho.put(trabalho)
+        # Uma imagem de arquivo é estática: não há como provar que a pessoa está
+        # viva e presente. O acesso é SEMPRE negado (e a tentativa é auditada).
+        area = self.combo_area.get()
+        try:
+            servico = self._garantir_access_service()
+            decisao = servico.attempt(
+                None, area, source="imagem", failure=core.RAZAO_IMAGEM_ESTATICA, simulated=False
+            )
+        except core.ErroDominio as exc:
+            self.label_mensagem.config(text=f"Erro: {exc}")
+            return
+        self._exibir_decisao(decisao)
+        self._registrar_no_historico(decisao, "imagem")
 
     # ------------------------------------------------------------------
     # Webcam
@@ -320,6 +352,16 @@ class CofreGUI:
         except vision.FaceError as exc:
             messagebox.showerror("Câmera indisponível", str(exc))
             return
+        import liveness
+
+        self._erro_vida = None
+        try:
+            self._tracker = liveness.FaceMeshTracker()
+        except liveness.LivenessUnavailable as exc:
+            self._tracker = None
+            self._erro_vida = str(exc)
+            messagebox.showerror("Prova de vida indisponível", f"{exc}\n\nNenhum acesso será liberado.")
+        self._sessao_vida = liveness.LivenessSession(now=time.monotonic()) if self._tracker else None
         self._webcam_ativa = True
         self._invalidar_geracao()
         self._loop_webcam()
@@ -329,24 +371,54 @@ class CofreGUI:
         if self._webcam is not None:
             self._webcam.close()
             self._webcam = None
+        if self._tracker is not None:
+            self._tracker.close()
+            self._tracker = None
+        self._sessao_vida = None
+        self._quadro_atual = None
+        self.label_vida.config(text="Prova de vida: câmera inativa", fg="#555555")
 
     def _loop_webcam(self) -> None:
         if not self._webcam_ativa or self._webcam is None:
             return
         quadro = self._webcam.read()
         if quadro is not None:
-            self._quadro_atual = quadro
-            self._mostrar_quadro(quadro)
+            import liveness
 
+            self._quadro_atual = quadro
             agora = time.monotonic()
-            if agora - self._ultima_verificacao_ts >= INTERVALO_VERIFICACAO_S:
+            sessao = self._sessao_vida
+            if sessao is not None and self._tracker is not None:
+                try:
+                    metricas = self._tracker.process(quadro)
+                except Exception:  # noqa: BLE001 - falha do rastreador = sem rosto
+                    metricas = None
+                sessao.step(metricas, agora)
+                self._mostrar_quadro(liveness.desenhar_instrucao(quadro, sessao))
+                self._atualizar_label_vida(sessao)
+            else:
+                self._mostrar_quadro(quadro)
+                self.label_vida.config(text="Prova de vida INDISPONÍVEL — acesso bloqueado", fg="#7a1f1f")
+
+            # Só envia quadros para reconhecimento quando a pessoa está viva e presente.
+            vivo = sessao is not None and sessao.vivo_e_presente(agora)
+            if vivo and not self._coletando and agora - self._ultima_verificacao_ts >= INTERVALO_VERIFICACAO_S:
                 self._ultima_verificacao_ts = agora
                 trabalho = _Trabalho(
-                    tipo="webcam", imagem=quadro.copy(), geracao=self._geracao_atual, timestamp=agora
+                    tipo="webcam", imagem=quadro.copy(), geracao=self._geracao_atual, timestamp=agora,
+                    sessao_id=sessao.id,
                 )
                 self._fila_trabalho.put(trabalho)
 
         self.root.after(30, self._loop_webcam)
+
+    def _atualizar_label_vida(self, sessao) -> None:
+        prog = sessao.progresso()
+        texto = f"Prova de vida{f' [{prog}]' if prog else ''}: {sessao.instrucao()}"
+        if sessao.hint and sessao.status == "desafio":
+            texto += f" — {sessao.hint}"
+        cor = {"aprovado": "#1a7a1a", "reprovado": "#7a1f1f"}.get(sessao.status, "#a86a00")
+        self.label_vida.config(text=texto, fg=cor)
 
     def _mostrar_quadro(self, quadro) -> None:
         import cv2
@@ -376,13 +448,24 @@ class CofreGUI:
         if resultado["geracao"] != self._geracao_atual:
             return  # obsoleto: área/fonte/cadastro mudou nesse meio-tempo
 
-        if resultado["tipo"] == "webcam":
-            idade = time.monotonic() - resultado["timestamp"]
-            if idade >= IDADE_MAXIMA_QUADRO_WEBCAM_S:
-                return  # resultado de webcam expirado
+        if resultado["tipo"] == "cadastro":
+            self._resultado_cadastro(resultado)
+            return
+        if resultado["tipo"] != "webcam":
+            return  # somente a webcam com prova de vida pode gerar decisão de acesso
+        idade = time.monotonic() - resultado["timestamp"]
+        if idade >= IDADE_MAXIMA_QUADRO_WEBCAM_S:
+            return  # resultado de webcam expirado
+        sessao = self._sessao_vida
+        if (
+            sessao is None
+            or sessao.id != resultado.get("sessao_id")
+            or not sessao.vivo_e_presente(time.monotonic())
+        ):
+            return  # a pessoa saiu do quadro/trocou de rosto entre a captura e o resultado
 
         area = self.combo_area.get()
-        fonte = "webcam" if resultado["tipo"] == "webcam" else "imagem"
+        fonte = "webcam"
         try:
             servico = self._garantir_access_service()
             decisao = servico.attempt(
@@ -441,46 +524,76 @@ class CofreGUI:
             messagebox.showinfo("Coletar", "Inicie a câmera e aguarde um quadro antes de coletar.")
             return
         agora = time.monotonic()
-        if agora - self._ultima_coleta_ts < INTERVALO_MIN_COLETA_S:
-            messagebox.showinfo("Coletar", "Aguarde ao menos 1 segundo entre coletas.")
+        sessao = self._sessao_vida
+        if sessao is None or not sessao.vivo_e_presente(agora):
+            messagebox.showinfo(
+                "Coletar",
+                "Conclua a prova de vida antes de coletar (siga as instruções exibidas no vídeo).",
+            )
             return
+        if agora - self._ultima_coleta_ts < INTERVALO_MIN_COLETA_S:
+            return  # ignora cliques repetidos (sem caixa modal, que congelaria o rastreamento)
+        if self._amostras_temporarias and self._sessao_amostras != sessao.id:
+            # Pessoa saiu do quadro/trocou desde a última amostra: recomeça a coleta.
+            self._limpar_coleta_temporaria()
+            self.label_coleta.config(text="Nova sessão de prova de vida — amostras anteriores descartadas")
         if len(self._amostras_temporarias) >= MAX_AMOSTRAS_TEMP:
             messagebox.showinfo("Coletar", f"Limite de {MAX_AMOSTRAS_TEMP} amostras temporárias atingido.")
             return
 
-        self._pausar_verificacao_automatica()
-        self._processar_amostra_para_cadastro(self._quadro_atual.copy())
-        self._ultima_coleta_ts = agora
-
-    def _processar_amostra_para_cadastro(self, imagem) -> None:
-        import cv2
-        import vision
-
-        try:
-            pipeline = vision.FacePipeline(allow_download=False)
-            amostra = pipeline.extract(imagem)
-        except vision.FaceError as exc:
-            messagebox.showerror("Falha ao processar amostra", str(exc))
-            return
-
-        ok, buffer = cv2.imencode(".png", imagem)
-        if not ok:
-            messagebox.showerror("Falha ao processar amostra", "Não foi possível codificar a imagem.")
-            return
+        imagem = self._quadro_atual.copy()
         pixels_hash = sha256(imagem.tobytes()).hexdigest()
-        for h in getattr(self, "_hashes_coletados", []):
-            if h == pixels_hash:
-                messagebox.showinfo("Amostra duplicada", "Esta imagem (mesmos pixels) já foi coletada.")
-                return
+        if pixels_hash in getattr(self, "_hashes_coletados", []):
+            self.label_coleta.config(text="Quadro idêntico a uma amostra já coletada — mova levemente o rosto")
+            return
+
+        self._sessao_amostras = sessao.id
+        self._pausar_verificacao_automatica()
+        self._ultima_coleta_ts = agora
+        # Extração na thread de inferência: o rastreamento da prova de vida
+        # continua rodando enquanto o FaceNet processa a amostra.
+        trabalho = _Trabalho(
+            tipo="cadastro", imagem=imagem, geracao=self._geracao_atual, timestamp=agora, sessao_id=sessao.id
+        )
+        trabalho.pixels_hash = pixels_hash
+        self._fila_trabalho.put(trabalho)
+        self.label_coleta.config(text=f"Processando amostra {len(self._amostras_temporarias) + 1}...")
+
+    def _resultado_cadastro(self, resultado: dict) -> None:
+        import cv2
+
+        sessao = self._sessao_vida
+        if (
+            sessao is None
+            or sessao.id != resultado.get("sessao_id")
+            or self._sessao_amostras != resultado.get("sessao_id")
+            or not sessao.vivo_e_presente(time.monotonic())
+        ):
+            self.label_coleta.config(
+                text=f"Amostra descartada: prova de vida perdida. Amostras coletadas: {len(self._amostras_temporarias)}"
+            )
+            return
+        if resultado["falha"] is not None:
+            self.label_coleta.config(
+                text=f"Falha ao processar amostra ({resultado['falha']}). "
+                     f"Amostras coletadas: {len(self._amostras_temporarias)}"
+            )
+            return
+        ok, buffer = cv2.imencode(".png", resultado["imagem"])
+        if not ok:
+            self.label_coleta.config(text="Falha ao codificar a amostra.")
+            return
         if not hasattr(self, "_hashes_coletados"):
             self._hashes_coletados = []
-        self._hashes_coletados.append(pixels_hash)
-
+        self._hashes_coletados.append(resultado.get("pixels_hash"))
         self._amostras_temporarias.append(buffer.tobytes())
-        self._amostras_temporarias_embeddings.append(amostra.embedding)
-        self.label_coleta.config(text=f"Amostras coletadas: {len(self._amostras_temporarias)}")
+        self._amostras_temporarias_embeddings.append(resultado["embedding"])
+        self.label_coleta.config(
+            text=f"Amostras coletadas: {len(self._amostras_temporarias)} (pessoa viva confirmada)"
+        )
 
     def _limpar_coleta_temporaria(self) -> None:
+        self._sessao_amostras = None
         self._amostras_temporarias.clear()
         self._amostras_temporarias_embeddings.clear()
         self._hashes_coletados = []

@@ -4,6 +4,11 @@
 Protótipo acadêmico local. Nenhuma fechadura física é acionada, nenhum
 sistema governamental real é acessado e nenhum documento real do Ministério
 do Meio Ambiente é utilizado. Todas as liberações são simuladas.
+
+Prova de vida: o acesso só é concedido pela webcam, após o desafio ativo de
+liveness.py (piscar / virar o rosto / abrir a boca). O comando `verificar`
+com arquivo de imagem SEMPRE nega o acesso: uma imagem estática não prova que
+a pessoa está viva e presente.
 """
 from __future__ import annotations
 
@@ -54,7 +59,7 @@ def cmd_diagnostico(args: argparse.Namespace) -> int:
 
     dependencias = [
         "tensorflow", "keras", "keras_facenet", "numpy", "scipy",
-        "cv2", "mtcnn", "sklearn", "matplotlib",
+        "cv2", "mtcnn", "sklearn", "matplotlib", "mediapipe",
     ]
     for nome in dependencias:
         try:
@@ -143,64 +148,88 @@ def cmd_cadastrar(args: argparse.Namespace) -> int:
 
 
 def cmd_verificar(args: argparse.Namespace) -> int:
+    """Verificação por ARQUIVO: sempre negada (sem prova de vida), mas auditada."""
     import vision
 
     if args.area not in core.AREAS:
         return _erro(f"área inválida: {args.area!r}")
 
-    pipeline = vision.FacePipeline(allow_download=False)
     store = core.Store(args.banco)
     try:
         servico = core.AccessService(store, vision.MODEL_ID, threshold=args.limiar, margin=args.margem)
-        falha = None
-        embedding = None
-        try:
-            imagem = vision.load_image(args.imagem)
-            amostra = pipeline.extract(imagem)
-            embedding = amostra.embedding
-        except vision.FaceError as exc:
-            falha = exc.reason
-
-        decisao = servico.attempt(embedding, args.area, source="imagem", failure=falha, simulated=False)
+        decisao = servico.attempt(
+            None, args.area, source="imagem", failure=core.RAZAO_IMAGEM_ESTATICA, simulated=False
+        )
     finally:
         store.close()
 
     print(json.dumps(_decisao_para_dict(decisao), ensure_ascii=False, indent=2))
-    return 0 if decisao.granted else 1
+    print(
+        "Acesso negado: uma imagem de arquivo não prova que a pessoa está viva e presente. "
+        "Use o comando 'webcam' (com prova de vida).",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def cmd_webcam(args: argparse.Namespace) -> int:
+    import time
+
     import cv2
 
+    import liveness
     import vision
 
     if args.area not in core.AREAS:
         return _erro(f"área inválida: {args.area!r}")
 
+    try:
+        tracker = liveness.FaceMeshTracker()
+    except liveness.LivenessUnavailable as exc:
+        return _erro(str(exc))
+
+    INTERVALO_S = 2.0
     pipeline = vision.FacePipeline(allow_download=False)
     store = core.Store(args.banco)
     try:
         servico = core.AccessService(store, vision.MODEL_ID, threshold=args.limiar, margin=args.margem)
+        sessao = liveness.LivenessSession(now=time.monotonic())
+        ultima = 0.0
+        ultimo_status = None
         try:
             with vision.Webcam(args.camera) as cam:
                 while True:
                     quadro = cam.read()
                     if quadro is None:
                         break
-                    falha = None
-                    embedding = None
+                    agora = time.monotonic()
                     try:
-                        amostra = pipeline.extract(quadro)
-                        embedding = amostra.embedding
-                    except vision.FaceError as exc:
-                        falha = exc.reason
+                        metricas = tracker.process(quadro)
+                    except Exception:  # noqa: BLE001 - falha do rastreador = sem rosto
+                        metricas = None
+                    sessao.step(metricas, agora)
 
-                    decisao = servico.attempt(
-                        embedding, args.area, source="webcam", failure=falha, simulated=False
-                    )
-                    print(json.dumps(_decisao_para_dict(decisao), ensure_ascii=False))
+                    chave = (sessao.id, sessao.status, sessao.idx, sessao.phase)
+                    if chave != ultimo_status:
+                        ultimo_status = chave
+                        print(f"[prova de vida] {sessao.progresso()} {sessao.instrucao()}".strip(), file=sys.stderr)
 
-                    cv2.imshow("Cofre — pressione Q ou Esc para sair", quadro)
+                    # Reconhecimento SOMENTE com a pessoa viva e presente.
+                    if sessao.vivo_e_presente(agora) and agora - ultima >= INTERVALO_S:
+                        ultima = agora
+                        falha = None
+                        embedding = None
+                        try:
+                            amostra = pipeline.extract(quadro)
+                            embedding = amostra.embedding
+                        except vision.FaceError as exc:
+                            falha = exc.reason
+                        decisao = servico.attempt(
+                            embedding, args.area, source="webcam", failure=falha, simulated=False
+                        )
+                        print(json.dumps(_decisao_para_dict(decisao), ensure_ascii=False))
+
+                    cv2.imshow("Cofre — pressione Q ou Esc para sair", liveness.desenhar_instrucao(quadro, sessao))
                     tecla = cv2.waitKey(1) & 0xFF
                     if tecla in (ord("q"), ord("Q"), 27):
                         break
@@ -208,6 +237,7 @@ def cmd_webcam(args: argparse.Namespace) -> int:
             print("Interrompido pelo teclado. Nenhuma liberação física foi acionada.")
         finally:
             cv2.destroyAllWindows()
+            tracker.close()
     finally:
         store.close()
     return 0
@@ -279,12 +309,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("imagens", nargs="+", help="Caminhos das imagens (mínimo 3)")
     p.set_defaults(func=cmd_cadastrar)
 
-    p = sub.add_parser("verificar", help="Verifica uma imagem contra a galeria e retorna a decisão em JSON")
+    p = sub.add_parser("verificar", help="Arquivo de imagem: SEMPRE negado (sem prova de vida); use 'webcam'")
     p.add_argument("imagem")
     p.add_argument("--area", required=True, choices=list(core.AREAS.keys()))
     p.set_defaults(func=cmd_verificar)
 
-    p = sub.add_parser("webcam", help="Verifica continuamente via webcam (Q ou Esc encerra)")
+    p = sub.add_parser("webcam", help="Verifica via webcam com prova de vida ativa (Q ou Esc encerra)")
     p.add_argument("--area", required=True, choices=list(core.AREAS.keys()))
     p.add_argument("--camera", type=int, default=0)
     p.set_defaults(func=cmd_webcam)
